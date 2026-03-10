@@ -46,22 +46,22 @@ OUTPUT_DIR = BASE_DIR / "shap_outputs"
 # ── Config ────────────────────────────────────────────────────────────────────
 # Synthetic benchmark function index (0=F1…6=F6).  Default 3 = F3 (★).
 SYNTH_FUNC_IDX    = 3
-NUM_SAMPLES       = 30_000
+NUM_SAMPLES       = 1_500
 SEED              = 42
 
 SNAPSHOT_EPOCHS   = [1, 3, 5, 10, 25, 50, 100, 150, 200, 300]
 INTERACTION_EPOCHS = [10, 150, 300]
 TOTAL_EPOCHS      = 300
 BATCH_SIZE        = 128
-LR                = 1e-3
+LR                = 1e-4
 N_SHAP_BG         = 80    # KernelExplainer background rows
 N_SHAP_EXPLAIN    = 60    # rows explained per snapshot
 PDP_SUBSAMPLE     = 300
 DPI               = 130
 
-HIDDEN_DIMS       = [64, 32]
-DROPOUT           = 0.3
-WEIGHT_DECAY      = 1e-3
+HIDDEN_DIMS       = [128, 64, 32]
+DROPOUT           = 0.0
+WEIGHT_DECAY      = 0.0
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
