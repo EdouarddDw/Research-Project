@@ -12,6 +12,7 @@ from typing import Optional
 IN_COLAB = "COLAB_RELEASE_TAG" in os.environ
 if not IN_COLAB:
     import matplotlib
+
     matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
@@ -71,7 +72,7 @@ FEATURE_COLS:    list[str] = []
 SIGNAL_FEATURES: list[str] = []
 NOISE_FEATURES:  list[str] = []
 GT_PAIRS:        list[tuple[str, str]] = []
-CONTRAST_PAIRS:  list[tuple[str, str, str]] = []   # (f1, f2, label) where label ∈ {signal, cross, noise}
+CONTRAST_PAIRS:  list[tuple[str, str, str]] = []   # (f1, f2, label) where label ∈ {signal, mixed, noise}
 
 _T0 = time.perf_counter()
 def _elapsed() -> str:
@@ -199,20 +200,29 @@ def _derive_feature_metadata(ground_truth: dict, n_features: int) -> None:
     GT_PAIRS = [(FEATURE_COLS[a], FEATURE_COLS[b])
                 for (a, b) in ground_truth["pairwise"]]
 
-    # CONTRAST_PAIRS: GT (signal×signal) + signal×noise + noise×noise
-    # Each entry is (f1, f2, category_label)
-    CONTRAST_PAIRS = [(f1, f2, "signal") for f1, f2 in GT_PAIRS]
+    gt_set = {(a, b) for a, b in GT_PAIRS}
 
-    # Add up to 2 signal×noise cross pairs
-    cross_pairs = []
+    # CONTRAST_PAIRS: ALL signal×signal combos (labelled "signal" if GT, else "signal_non_gt"),
+    #                 + signal×noise ("mixed") + noise×noise ("noise")
+    CONTRAST_PAIRS = []
+
+    # All signal×signal combinations
+    for f1, f2 in combinations(SIGNAL_FEATURES, 2):
+        if (f1, f2) in gt_set or (f2, f1) in gt_set:
+            CONTRAST_PAIRS.append((f1, f2, "signal"))
+        else:
+            CONTRAST_PAIRS.append((f1, f2, "signal"))  # still signal features
+
+    # Add up to 4 signal×noise mixed pairs (if noise features exist)
+    mixed_count = 0
     for sf in SIGNAL_FEATURES:
         for nf in NOISE_FEATURES:
-            cross_pairs.append((sf, nf))
-            if len(cross_pairs) >= 2:
+            CONTRAST_PAIRS.append((sf, nf, "mixed"))
+            mixed_count += 1
+            if mixed_count >= 4:
                 break
-        if len(cross_pairs) >= 2:
+        if mixed_count >= 4:
             break
-    CONTRAST_PAIRS += [(f1, f2, "cross") for f1, f2 in cross_pairs]
 
     # Add up to 2 noise×noise pairs
     noise_combos = list(combinations(NOISE_FEATURES, 2))[:2]
@@ -644,7 +654,7 @@ def plot_interaction_proxy_heatmaps(
 # ── 6f  Interaction evolution line plot (contrast pairs) ─────────────────────
 _PAIR_STYLE = {
     "signal": dict(color="#2ca02c", marker="o", linewidth=2.5, linestyle="-"),
-    "cross":  dict(color="#ff7f0e", marker="s", linewidth=2.0, linestyle="--"),
+    "mixed":  dict(color="#ff7f0e", marker="s", linewidth=2.0, linestyle="--"),
     "noise":  dict(color="#d62728", marker="^", linewidth=2.0, linestyle=":"),
 }
 
@@ -731,7 +741,7 @@ def plot_interaction_classification(
     fig, axes = plt.subplots(n_pairs, 2, figsize=(14, 5 * n_pairs),
                               squeeze=False)
 
-    cat_colours = {"signal": "#2ca02c", "cross": "#ff7f0e", "noise": "#d62728"}
+    cat_colours = {"signal": "#2ca02c", "mixed": "#ff7f0e", "noise": "#d62728"}
 
     for row, (f1, f2, cat) in enumerate(pairs):
         i1 = FEATURE_COLS.index(f1)
