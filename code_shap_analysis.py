@@ -54,7 +54,7 @@ NUM_SAMPLES       = 1_500
 SEED              = 42
 
 SNAPSHOT_EPOCHS   = [1, 3, 5, 10, 20, 30, 40, 50, 100, 150, 250]
-INTERACTION_EPOCHS = [10, 25, 50]
+INTERACTION_EPOCHS = [20, 50, 150]
 TOTAL_EPOCHS      = 250
 BATCH_SIZE        = 128
 LR                = 1e-4
@@ -324,10 +324,15 @@ def compute_h_statistic(
     grid_res: int = 30,
 ) -> float:
     """
-    Friedman's H-statistic for the pair (f1_idx, f2_idx).
+    Friedman & Popescu (2008) H-statistic for the pair (f1_idx, f2_idx).
 
-    H²_jk = Σ [PDP_jk(x_j, x_k) - PDP_j(x_j) - PDP_k(x_k)]²
-            / Σ PDP_jk(x_j, x_k)²
+    All PDPs must be **centred** (subtract the overall mean prediction f̄)
+    before computing the ratio:
+
+        H²_jk = Σ [f̃_jk(x_j, x_k) - f̃_j(x_j) - f̃_k(x_k)]²
+                / Σ f̃_jk(x_j, x_k)²
+
+    where f̃ = PDP − f̄.
 
     Returns H ∈ [0, 1].  Values near 0 → additive, near 1 → strong interaction.
     """
@@ -339,20 +344,33 @@ def compute_h_statistic(
         pdp_jk = partial_dependence(wrapper, X_pdp, features=[(f1_idx, f2_idx)],
                                     grid_resolution=grid_res, kind="average")
 
-        # 1-D marginal PDPs (centred)
-        pdp_j_vals = pdp_j["average"][0]      # shape (grid_res,)
-        pdp_k_vals = pdp_k["average"][0]      # shape (grid_res,)
-        pdp_jk_vals = pdp_jk["average"][0]    # shape (grid_j, grid_k)
+        # Raw PDP arrays (NOT yet centred)
+        pdp_j_vals  = pdp_j["average"][0]       # shape (grid_j,)
+        pdp_k_vals  = pdp_k["average"][0]       # shape (grid_k,)
+        pdp_jk_vals = pdp_jk["average"][0]      # shape (grid_j, grid_k)
 
-        # Broadcast marginals onto the 2-D grid
-        pdp_j_2d = pdp_j_vals[:, None]        # (grid_j, 1)
-        pdp_k_2d = pdp_k_vals[None, :]        # (1, grid_k)
+        # Overall mean prediction (f̄) — average of the 2-D PDP surface
+        f_bar = pdp_jk_vals.mean()
 
-        residual = pdp_jk_vals - pdp_j_2d - pdp_k_2d
-        denom    = np.sum(pdp_jk_vals ** 2)
+        # Centre everything by subtracting f̄
+        pdp_j_c  = pdp_j_vals  - f_bar           # f̃_j
+        pdp_k_c  = pdp_k_vals  - f_bar           # f̃_k
+        pdp_jk_c = pdp_jk_vals - f_bar           # f̃_jk
+
+        # Broadcast centred marginals onto the 2-D grid
+        pdp_j_2d = pdp_j_c[:, None]              # (grid_j, 1)
+        pdp_k_2d = pdp_k_c[None, :]              # (1, grid_k)
+
+        # Numerator: interaction residual after removing centred main effects
+        residual = pdp_jk_c - pdp_j_2d - pdp_k_2d
+        numer    = np.sum(residual ** 2)
+
+        # Denominator: total centred joint variance
+        denom = np.sum(pdp_jk_c ** 2)
         if denom < 1e-20:
             return 0.0
-        h_sq = np.sum(residual ** 2) / denom
+
+        h_sq = numer / denom
         return float(np.sqrt(np.clip(h_sq, 0, 1)))
     except Exception:
         return 0.0
@@ -1061,7 +1079,7 @@ def plot_h_statistic_evolution(
 def plot_interaction_network(
     snaps: list[Snapshot],
     model_label: str = "model",
-    threshold: float = 0.15,
+    threshold: float = 0.30,
 ) -> None:
     """
     Network graph at each INTERACTION_EPOCH:
@@ -1105,7 +1123,7 @@ def plot_interaction_network(
 
         # Edge widths & colours
         edges = G.edges(data=True)
-        widths = [e[2]["weight"] * 6 for e in edges]
+        widths = [e[2]["weight"] * 8 for e in edges]
         edge_colours = [plt.cm.Oranges(e[2]["weight"]) for e in edges]
 
         nx.draw_networkx_nodes(G, pos, ax=ax, node_color=node_colours,
@@ -1117,6 +1135,15 @@ def plot_interaction_network(
 
         ax.set_title(f"Epoch {snap.epoch}", fontsize=12)
         ax.axis("off")
+
+    # ── Legend for node colours ───────────────────────────────────────────────
+    import matplotlib.patches as mpatches
+    legend_handles = [
+        mpatches.Patch(color="#2ca02c", label="Signal feature"),
+        mpatches.Patch(color="#d62728", label="Noise feature"),
+    ]
+    fig.legend(handles=legend_handles, loc="lower center", ncol=2,
+               fontsize=11, framealpha=0.9, bbox_to_anchor=(0.5, -0.02))
 
     fig.suptitle(f"{model_label} – Feature interaction network  (threshold={threshold})",
                  fontsize=13, y=1.02)
