@@ -4,6 +4,7 @@ import os
 import time
 import warnings
 from dataclasses import dataclass
+from itertools import combinations
 from pathlib import Path
 from typing import Optional
 
@@ -49,9 +50,9 @@ SYNTH_FUNC_IDX    = 3
 NUM_SAMPLES       = 1_500
 SEED              = 42
 
-SNAPSHOT_EPOCHS   = [1, 3, 5, 10, 25, 50, 100, 150, 200, 300]
-INTERACTION_EPOCHS = [10, 150, 300]
-TOTAL_EPOCHS      = 300
+SNAPSHOT_EPOCHS   = [1, 3, 5, 10, 20, 30, 40, 50, 100, 150, 250]
+INTERACTION_EPOCHS = [10, 25, 50]
+TOTAL_EPOCHS      = 250
 BATCH_SIZE        = 128
 LR                = 1e-4
 N_SHAP_BG         = 80    # KernelExplainer background rows
@@ -70,6 +71,7 @@ FEATURE_COLS:    list[str] = []
 SIGNAL_FEATURES: list[str] = []
 NOISE_FEATURES:  list[str] = []
 GT_PAIRS:        list[tuple[str, str]] = []
+CONTRAST_PAIRS:  list[tuple[str, str, str]] = []   # (f1, f2, label) where label ∈ {signal, cross, noise}
 
 _T0 = time.perf_counter()
 def _elapsed() -> str:
@@ -181,7 +183,7 @@ def _derive_feature_metadata(ground_truth: dict, n_features: int) -> None:
     Populate the module-level FEATURE_COLS, SIGNAL_FEATURES, NOISE_FEATURES,
     and GT_PAIRS from synth.py's ground_truth dict.
     """
-    global FEATURE_COLS, SIGNAL_FEATURES, NOISE_FEATURES, GT_PAIRS
+    global FEATURE_COLS, SIGNAL_FEATURES, NOISE_FEATURES, GT_PAIRS, CONTRAST_PAIRS
 
     FEATURE_COLS = [f"x{i}" for i in range(n_features)]
 
@@ -196,6 +198,25 @@ def _derive_feature_metadata(ground_truth: dict, n_features: int) -> None:
     # GT_PAIRS: take the pairwise ground-truth tuples (0-indexed ints → name strings)
     GT_PAIRS = [(FEATURE_COLS[a], FEATURE_COLS[b])
                 for (a, b) in ground_truth["pairwise"]]
+
+    # CONTRAST_PAIRS: GT (signal×signal) + signal×noise + noise×noise
+    # Each entry is (f1, f2, category_label)
+    CONTRAST_PAIRS = [(f1, f2, "signal") for f1, f2 in GT_PAIRS]
+
+    # Add up to 2 signal×noise cross pairs
+    cross_pairs = []
+    for sf in SIGNAL_FEATURES:
+        for nf in NOISE_FEATURES:
+            cross_pairs.append((sf, nf))
+            if len(cross_pairs) >= 2:
+                break
+        if len(cross_pairs) >= 2:
+            break
+    CONTRAST_PAIRS += [(f1, f2, "cross") for f1, f2 in cross_pairs]
+
+    # Add up to 2 noise×noise pairs
+    noise_combos = list(combinations(NOISE_FEATURES, 2))[:2]
+    CONTRAST_PAIRS += [(f1, f2, "noise") for f1, f2 in noise_combos]
 
 
 def load_synth_data(
@@ -611,53 +632,57 @@ def plot_interaction_proxy_heatmaps(
     print(f"  saved: {fname}")
 
 
-# ── 6f  Interaction evolution line plot (ground-truth pairs) ──────────────────
+# ── 6f  Interaction evolution line plot (contrast pairs) ─────────────────────
+_PAIR_STYLE = {
+    "signal": dict(color="#2ca02c", marker="o", linewidth=2.5, linestyle="-"),
+    "cross":  dict(color="#ff7f0e", marker="s", linewidth=2.0, linestyle="--"),
+    "noise":  dict(color="#d62728", marker="^", linewidth=2.0, linestyle=":"),
+}
+
 def plot_interaction_evolution(
     snaps: list[Snapshot],
     X_ex_raw: np.ndarray,
     model_label: str = "model",
 ) -> None:
     """
-    For each ground-truth pair, track the proxy interaction strength
-    across SHAP snapshot epochs (using |corr(SHAP_f1, X_f2)|).
-    Uses the same metric as compute_interaction_proxy.
+    Track interaction proxy |corr(SHAP_f1, X_f2)| across epochs for
+    three categories of feature pairs:
+      • signal (GT pairs)  – should spike early and stay high
+      • cross  (signal×noise) – should stay low, may creep up with overfitting
+      • noise  (noise×noise)  – should stay near zero, grows late if overfitting
+    All curves on one axis for a clear contrast.
     """
-    n_pairs = len(GT_PAIRS)
-    if n_pairs == 0:
-        print("  [warn] no GT_PAIRS defined, skipping interaction evolution.")
+    if not CONTRAST_PAIRS:
+        print("  [warn] no CONTRAST_PAIRS, skipping interaction evolution.")
         return
 
-    rows = int(np.ceil(n_pairs / 2))
-    cols = min(n_pairs, 2)
-    fig, axes = plt.subplots(rows, cols, figsize=(7 * cols, 4 * rows),
-                              sharex=True, squeeze=False)
+    shap_snaps = [s for s in snaps if s.shap_values is not None]
+    if not shap_snaps:
+        print("  [warn] no SHAP snapshots, skipping interaction evolution.")
+        return
 
-    for idx, (f1, f2) in enumerate(GT_PAIRS):
+    epochs = [s.epoch for s in shap_snaps]
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+
+    for f1, f2, cat in CONTRAST_PAIRS:
         i1 = FEATURE_COLS.index(f1)
         i2 = FEATURE_COLS.index(f2)
 
-        shap_snaps = [s for s in snaps if s.shap_values is not None]
-        epochs  = [s.epoch for s in shap_snaps]
         proxies = []
         for s in shap_snaps:
-            c = np.corrcoef(s.shap_values[:, i1],
-                            X_ex_raw[:, i2])[0, 1]
+            c = np.corrcoef(s.shap_values[:, i1], X_ex_raw[:, i2])[0, 1]
             proxies.append(abs(c) if np.isfinite(c) else 0.0)
 
-        r, c = divmod(idx, cols)
-        ax = axes[r][c]
-        ax.plot(epochs, proxies, marker="o", linewidth=2)
-        ax.set_title(f"{f1} × {f2}")
-        ax.set_ylabel("|corr(SHAP_i, X_j)|")
-        ax.set_xlabel("Epoch")
-        ax.set_ylim(0, 1)
+        style = _PAIR_STYLE[cat]
+        ax.plot(epochs, proxies, label=f"{f1}×{f2} [{cat}]", **style)
 
-    # Hide unused axes
-    for idx in range(n_pairs, rows * cols):
-        r, c = divmod(idx, cols)
-        axes[r][c].set_visible(False)
-
-    fig.suptitle(f"{model_label} – Interaction proxy evolution", fontsize=13, y=1.02)
+    ax.set_xlabel("Epoch", fontsize=11)
+    ax.set_ylabel("|corr(SHAP_i, X_j)|  (interaction proxy)", fontsize=11)
+    ax.set_ylim(0, 1)
+    ax.legend(loc="upper left", fontsize=9, framealpha=0.9)
+    ax.set_title(f"{model_label} – Interaction proxy evolution  "
+                 "(signal vs cross vs noise pairs)", fontsize=13)
     plt.tight_layout()
     plt.savefig(OUTPUT_DIR / "06_interaction_evolution.png", dpi=DPI, bbox_inches="tight")
     plt.close(fig)
@@ -673,9 +698,11 @@ def plot_interaction_classification(
     model_label: str,
 ) -> None:
     """
-    For each GT pair: classify interaction type (crossover / modifier / symmetric)
-    using the LAST snapshot, then plot conditional 1-D PDPs (feature1 PDP
-    conditioned on feature2 low vs high).
+    For each *contrast* pair (signal, cross, noise): classify interaction type
+    (crossover / modifier / symmetric) using the LAST snapshot, then plot
+    SHAP scatter + conditional 1-D PDP.
+    Signal pairs should show clear interaction; noise pairs should show
+    false-positive interactions only when overfitting.
     """
     last_shap = next(
         (s for s in reversed(snaps) if s.shap_values is not None), None
@@ -684,18 +711,26 @@ def plot_interaction_classification(
         print("  [warn] no SHAP snapshots, skipping interaction classification.")
         return
 
+    pairs = CONTRAST_PAIRS if CONTRAST_PAIRS else [(f1, f2, "signal") for f1, f2 in GT_PAIRS]
+    n_pairs = len(pairs)
+    if n_pairs == 0:
+        print("  [warn] no pairs for interaction classification.")
+        return
+
     X_pdp = X_va_df.sample(min(PDP_SUBSAMPLE, len(X_va_df)), random_state=42)
 
-    n_pairs = len(GT_PAIRS)
-    fig, axes = plt.subplots(n_pairs, 2, figsize=(14, 5 * n_pairs))
+    fig, axes = plt.subplots(n_pairs, 2, figsize=(14, 5 * n_pairs),
+                              squeeze=False)
 
-    for row, (f1, f2) in enumerate(GT_PAIRS):
+    cat_colours = {"signal": "#2ca02c", "cross": "#ff7f0e", "noise": "#d62728"}
+
+    for row, (f1, f2, cat) in enumerate(pairs):
+        i1 = FEATURE_COLS.index(f1)
         i2 = FEATURE_COLS.index(f2)
         itype = classify_interaction(last_shap.shap_values, X_ex_raw, f1, f2)
 
         # ── left panel: SHAP scatter coloured by f2 ──────────────────────────
         ax_l = axes[row][0]
-        i1   = FEATURE_COLS.index(f1)
         sc   = ax_l.scatter(
             X_ex_raw[:, i1],
             last_shap.shap_values[:, i1],
@@ -705,7 +740,9 @@ def plot_interaction_classification(
         fig.colorbar(sc, ax=ax_l, label=f2)
         ax_l.axhline(0, color="k", lw=0.8, linestyle="--")
         ax_l.set_xlabel(f1); ax_l.set_ylabel(f"SHAP({f1})")
-        ax_l.set_title(f"[{itype.upper()}]  {f1} (colour = {f2})")
+        badge = cat.upper()
+        ax_l.set_title(f"[{badge} · {itype.upper()}]  {f1} (colour = {f2})",
+                       color=cat_colours.get(cat, "k"))
 
         # ── right panel: conditioned 1-D PDP ─────────────────────────────────
         ax_r   = axes[row][1]
@@ -715,9 +752,6 @@ def plot_interaction_classification(
 
         f1_idx = FEATURE_COLS.index(f1)
 
-        # Build a shared grid from the FULL X_pdp so both curves span
-        # the same x-axis range (fixes missing blue line when the low
-        # subset has a narrower range than the high subset).
         full_col = X_pdp.iloc[:, f1_idx].values
         shared_grid = np.linspace(
             np.percentile(full_col, 2),
@@ -730,23 +764,23 @@ def plot_interaction_classification(
             (X_high, "tomato",    f"{f2} high"),
         ]:
             if len(subset) > 10:
-                # Evaluate model on shared grid, varying f1 only
-                tile = np.tile(subset.values, (len(shared_grid), 1, 1))  # (G, N, F)
+                tile = np.tile(subset.values, (len(shared_grid), 1, 1))
                 tile[:, :, f1_idx] = shared_grid[:, None]
                 G, N, F = tile.shape
                 flat = tile.reshape(G * N, F)
                 proba = wrapper.predict_proba(flat)[:, 1].reshape(G, N)
-                pdp_vals = proba.mean(axis=1)          # average over N
+                pdp_vals = proba.mean(axis=1)
                 ax_r.plot(
                     shared_grid, pdp_vals,
                     color=colour, linewidth=2, label=lbl,
                 )
         ax_r.set_xlabel(f1)
         ax_r.set_ylabel("Partial dependence")
-        ax_r.set_title(f"PDP of {f1} | {f2} split  [{itype}]")
+        ax_r.set_title(f"PDP of {f1} | {f2} split  [{badge} · {itype}]",
+                       color=cat_colours.get(cat, "k"))
         ax_r.legend()
 
-    fig.suptitle(f"{model_label} – Interaction classification + conditional PDPs",
+    fig.suptitle(f"{model_label} – Interaction classification (signal vs cross vs noise)",
                  fontsize=13, y=1.01)
     plt.tight_layout()
     fname = f"07_interaction_classification_{model_label}.png"
