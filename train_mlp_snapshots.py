@@ -42,9 +42,9 @@ BATCH_SIZE   = 256
 VAL_SPLIT    = 0.2
 
 # Snapshot epochs (logarithmic spacing + key milestones)
-SNAPSHOT_EPOCHS = sorted(set(
+SNAPSHOT_EPOCHS = sorted(
     [1, 2, 3, 5, 8, 10, 15, 20, 30, 50, 75, 100, 150, 200, 250, 300]
-))
+    )
 
 # Base output directory; individual runs write to subfolders under this
 BASE_OUTPUT_DIR = "./outputs/snapshots"
