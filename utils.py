@@ -1,7 +1,6 @@
 import torch
 from torch.utils import data
 import numpy as np
-import sklearn
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import roc_auc_score
 
