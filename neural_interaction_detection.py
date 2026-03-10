@@ -101,6 +101,32 @@ def prune_redundant_interactions(interaction_ranking, max_interactions=100):
     return interaction_ranking_pruned
 
 
+def interactions_to_matrix(interactions: list, num_vars: int) -> np.ndarray:
+    """Convert a list of ((i, j, ...), strength) tuples to a symmetric matrix.
+    
+    For pairwise interactions, fills matrix[i][j] and matrix[j][i].
+    For higher-order interactions, accumulates strength into all pairwise cells.
+    
+    Args:
+        interactions: List of (indices_tuple, strength) where indices are 1-indexed.
+        num_vars: Number of variables (determines matrix size).
+    
+    Returns:
+        Symmetric matrix of interaction strengths.
+    """
+    matrix = np.zeros((num_vars, num_vars), dtype=float)
+    for indices, strength in interactions:
+        # Convert np.int64 to int, then to 0-indexed
+        idx_list = [int(i) - 1 for i in indices]
+        # For each pair within the interaction tuple
+        for a in range(len(idx_list)):
+            for b in range(a + 1, len(idx_list)):
+                i, j = idx_list[a], idx_list[b]
+                matrix[i, j] += float(strength)
+                matrix[j, i] += float(strength)
+    return matrix
+
+
 def detect_interactions(
     Xd,
     Yd,
