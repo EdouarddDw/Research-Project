@@ -28,6 +28,8 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.inspection import partial_dependence
 
 # ── Project imports ───────────────────────────────────────────────────────────
+import networkx as nx
+
 import synth
 from utils import set_seed
 
@@ -312,6 +314,48 @@ def compute_interaction_proxy(
                 c = np.corrcoef(shap_vals[:, i], X_raw[:, j])[0, 1]
                 proxy[i, j] = abs(c) if np.isfinite(c) else 0.0
     return proxy
+
+
+def compute_h_statistic(
+    wrapper: ModelWrapper,
+    X_pdp: pd.DataFrame,
+    f1_idx: int,
+    f2_idx: int,
+    grid_res: int = 30,
+) -> float:
+    """
+    Friedman's H-statistic for the pair (f1_idx, f2_idx).
+
+    H²_jk = Σ [PDP_jk(x_j, x_k) - PDP_j(x_j) - PDP_k(x_k)]²
+            / Σ PDP_jk(x_j, x_k)²
+
+    Returns H ∈ [0, 1].  Values near 0 → additive, near 1 → strong interaction.
+    """
+    try:
+        pdp_j  = partial_dependence(wrapper, X_pdp, features=[f1_idx],
+                                    grid_resolution=grid_res, kind="average")
+        pdp_k  = partial_dependence(wrapper, X_pdp, features=[f2_idx],
+                                    grid_resolution=grid_res, kind="average")
+        pdp_jk = partial_dependence(wrapper, X_pdp, features=[(f1_idx, f2_idx)],
+                                    grid_resolution=grid_res, kind="average")
+
+        # 1-D marginal PDPs (centred)
+        pdp_j_vals = pdp_j["average"][0]      # shape (grid_res,)
+        pdp_k_vals = pdp_k["average"][0]      # shape (grid_res,)
+        pdp_jk_vals = pdp_jk["average"][0]    # shape (grid_j, grid_k)
+
+        # Broadcast marginals onto the 2-D grid
+        pdp_j_2d = pdp_j_vals[:, None]        # (grid_j, 1)
+        pdp_k_2d = pdp_k_vals[None, :]        # (1, grid_k)
+
+        residual = pdp_jk_vals - pdp_j_2d - pdp_k_2d
+        denom    = np.sum(pdp_jk_vals ** 2)
+        if denom < 1e-20:
+            return 0.0
+        h_sq = np.sum(residual ** 2) / denom
+        return float(np.sqrt(np.clip(h_sq, 0, 1)))
+    except Exception:
+        return 0.0
 
 
 def train_model(
@@ -953,6 +997,328 @@ def plot_local_evolution(
     print(f"  saved: {fname}")
 
 
+# ── 6j  H-statistic evolution (Friedman) ─────────────────────────────────────
+def plot_h_statistic_evolution(
+    snaps: list[Snapshot],
+    hidden_dims: list[int],
+    dropout: float,
+    scaler: StandardScaler,
+    X_va_df: pd.DataFrame,
+    model_label: str = "model",
+) -> None:
+    """
+    Track Friedman's H-statistic for CONTRAST_PAIRS across epochs that have
+    saved model_state.  This measures true PDP-based interaction strength,
+    complementing the SHAP-correlation proxy in plot_interaction_evolution().
+    """
+    proxy_snaps = [s for s in snaps if s.model_state is not None]
+    if not proxy_snaps:
+        print("  [warn] no model states saved, skipping H-statistic evolution.")
+        return
+
+    pairs = CONTRAST_PAIRS if CONTRAST_PAIRS else [(f1, f2, "signal") for f1, f2 in GT_PAIRS]
+    if not pairs:
+        print("  [warn] no pairs, skipping H-statistic evolution.")
+        return
+
+    X_pdp = X_va_df.sample(min(PDP_SUBSAMPLE, len(X_va_df)), random_state=42)
+    epochs = [s.epoch for s in proxy_snaps]
+
+    # Compute H-statistic for each pair at each epoch
+    pair_h: dict[str, list[float]] = {}
+    for f1, f2, cat in pairs:
+        key = f"{f1}×{f2} [{cat}]"
+        pair_h[key] = []
+        i1 = FEATURE_COLS.index(f1)
+        i2 = FEATURE_COLS.index(f2)
+        for snap in proxy_snaps:
+            m = PurchaseNN(len(FEATURE_COLS), hidden_dims, dropout)
+            m.load_state_dict(snap.model_state)
+            m.eval()
+            w = ModelWrapper(m, scaler)
+            h = compute_h_statistic(w, X_pdp, i1, i2, grid_res=25)
+            pair_h[key].append(h)
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    for (f1, f2, cat), key in zip(pairs, pair_h.keys()):
+        style = _PAIR_STYLE.get(cat, dict(color="gray", marker=".", linewidth=1.5, linestyle="-"))
+        ax.plot(epochs, pair_h[key], label=key, **style)
+
+    ax.set_xlabel("Epoch", fontsize=11)
+    ax.set_ylabel("Friedman H-statistic", fontsize=11)
+    ax.set_ylim(0, 1)
+    ax.legend(loc="upper left", fontsize=8, framealpha=0.9, ncol=2)
+    ax.set_title(f"{model_label} – H-statistic evolution (PDP-based interaction strength)",
+                 fontsize=13)
+    plt.tight_layout()
+    fname = f"10_h_statistic_evolution_{model_label}.png"
+    plt.savefig(OUTPUT_DIR / fname, dpi=DPI, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  saved: {fname}")
+
+
+# ── 6k  Feature interaction network graphs ───────────────────────────────────
+def plot_interaction_network(
+    snaps: list[Snapshot],
+    model_label: str = "model",
+    threshold: float = 0.15,
+) -> None:
+    """
+    Network graph at each INTERACTION_EPOCH:
+      - Nodes = features (green = signal, red = noise)
+      - Edges = interaction proxy strength (width ∝ magnitude)
+      - Suppress edges below *threshold*
+    """
+    proxy_snaps = [s for s in snaps if s.interaction_proxy is not None]
+    if not proxy_snaps:
+        print("  [warn] no interaction proxy snapshots, skipping network graph.")
+        return
+
+    n_epochs = len(proxy_snaps)
+    fig, axes = plt.subplots(1, n_epochs, figsize=(7 * n_epochs, 7))
+    if n_epochs == 1:
+        axes = [axes]
+
+    signal_set = set(SIGNAL_FEATURES)
+
+    for ax, snap in zip(axes, proxy_snaps):
+        M = snap.interaction_proxy
+        n_feat = min(M.shape[0], len(FEATURE_COLS))
+
+        G = nx.Graph()
+        for i in range(n_feat):
+            G.add_node(FEATURE_COLS[i])
+
+        for i in range(n_feat):
+            for j in range(i + 1, n_feat):
+                strength = (M[i, j] + M[j, i]) / 2  # symmetrise
+                if strength >= threshold:
+                    G.add_edge(FEATURE_COLS[i], FEATURE_COLS[j], weight=strength)
+
+        pos = nx.spring_layout(G, seed=42, k=1.5)
+
+        # Node colours
+        node_colours = [
+            "#2ca02c" if f in signal_set else "#d62728"
+            for f in G.nodes()
+        ]
+
+        # Edge widths & colours
+        edges = G.edges(data=True)
+        widths = [e[2]["weight"] * 6 for e in edges]
+        edge_colours = [plt.cm.Oranges(e[2]["weight"]) for e in edges]
+
+        nx.draw_networkx_nodes(G, pos, ax=ax, node_color=node_colours,
+                               node_size=600, edgecolors="black", linewidths=1.0)
+        nx.draw_networkx_labels(G, pos, ax=ax, font_size=9, font_weight="bold")
+        if edges:
+            nx.draw_networkx_edges(G, pos, ax=ax, width=widths,
+                                   edge_color=edge_colours, alpha=0.8)
+
+        ax.set_title(f"Epoch {snap.epoch}", fontsize=12)
+        ax.axis("off")
+
+    fig.suptitle(f"{model_label} – Feature interaction network  (threshold={threshold})",
+                 fontsize=13, y=1.02)
+    plt.tight_layout()
+    fname = f"11_interaction_network_{model_label}.png"
+    plt.savefig(OUTPUT_DIR / fname, dpi=DPI, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  saved: {fname}")
+
+
+# ── 6l  2-D PDP contour time-lapse (unified colour scale) ───────────────────
+def plot_2d_pdp_timelapse(
+    model_name: str,
+    snaps: list[Snapshot],
+    hidden_dims: list[int],
+    dropout: float,
+    scaler: StandardScaler,
+    X_va_df: pd.DataFrame,
+) -> None:
+    """
+    Unified time-lapse grid: rows = feature pairs, columns = epochs.
+    All subplots share the same colour scale for honest comparison.
+    Uses CONTRAST_PAIRS[:6] to include non-GT pairs that may show crossover.
+    """
+    proxy_snaps = [s for s in snaps if s.model_state is not None]
+    if not proxy_snaps:
+        print("  [warn] no model states saved, skipping 2-D PDP time-lapse.")
+        return
+
+    X_pdp = X_va_df.sample(min(PDP_SUBSAMPLE, len(X_va_df)), random_state=42)
+
+    # Use up to 6 contrast pairs (prioritise GT pairs first)
+    gt_set = {(a, b) for a, b in GT_PAIRS}
+    gt_contrast = [(f1, f2, c) for f1, f2, c in CONTRAST_PAIRS
+                   if (f1, f2) in gt_set or (f2, f1) in gt_set]
+    non_gt = [(f1, f2, c) for f1, f2, c in CONTRAST_PAIRS
+              if (f1, f2) not in gt_set and (f2, f1) not in gt_set]
+    pairs = (gt_contrast + non_gt)[:6]
+    if not pairs:
+        print("  [warn] no pairs for 2-D PDP time-lapse.")
+        return
+
+    n_pairs  = len(pairs)
+    n_epochs = len(proxy_snaps)
+
+    # First pass: compute all Z arrays & find global vmin/vmax
+    Z_all = {}  # (pair_idx, epoch_idx) → (G1, G2, Z)
+    global_vmin = np.inf
+    global_vmax = -np.inf
+
+    for ei, snap in enumerate(proxy_snaps):
+        m = PurchaseNN(len(FEATURE_COLS), hidden_dims, dropout)
+        m.load_state_dict(snap.model_state)
+        m.eval()
+        w = ModelWrapper(m, scaler)
+        for pi, (f1, f2, _) in enumerate(pairs):
+            i1 = FEATURE_COLS.index(f1)
+            i2 = FEATURE_COLS.index(f2)
+            pdp_res = partial_dependence(
+                w, X_pdp, features=[(i1, i2)],
+                grid_resolution=30, kind="average",
+            )
+            g1, g2 = pdp_res["grid_values"]
+            Z = pdp_res["average"][0]
+            G1, G2 = np.meshgrid(g1, g2)
+            Z_all[(pi, ei)] = (G1, G2, Z)
+            global_vmin = min(global_vmin, Z.min())
+            global_vmax = max(global_vmax, Z.max())
+
+    # Second pass: plot with shared colour range
+    fig, axes = plt.subplots(n_pairs, n_epochs,
+                              figsize=(6 * n_epochs, 5 * n_pairs),
+                              squeeze=False)
+
+    levels = np.linspace(global_vmin, global_vmax, 20)
+
+    for pi, (f1, f2, cat) in enumerate(pairs):
+        for ei, snap in enumerate(proxy_snaps):
+            ax = axes[pi][ei]
+            G1, G2, Z = Z_all[(pi, ei)]
+            cs = ax.contourf(G1, G2, Z.T, levels=levels, cmap="viridis", alpha=0.8)
+            ax.set_xlabel(f1, fontsize=9)
+            ax.set_ylabel(f2, fontsize=9)
+            if pi == 0:
+                ax.set_title(f"Epoch {snap.epoch}", fontsize=11, fontweight="bold")
+            if ei == 0:
+                ax.annotate(f"{f1}×{f2}\n[{cat}]", xy=(-0.35, 0.5),
+                            xycoords="axes fraction", fontsize=10,
+                            ha="center", va="center", rotation=90)
+
+    # Single shared colorbar
+    fig.subplots_adjust(right=0.92)
+    cbar_ax = fig.add_axes([0.94, 0.15, 0.015, 0.7])
+    fig.colorbar(cs, cax=cbar_ax, label="Partial dependence")
+
+    fig.suptitle(f"{model_name} – 2-D PDP time-lapse (shared colour scale)",
+                 fontsize=14, y=1.01)
+    plt.tight_layout(rect=[0, 0, 0.92, 0.98])
+    fname = f"12_2d_pdp_timelapse_{model_name}.png"
+    plt.savefig(OUTPUT_DIR / fname, dpi=DPI, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  saved: {fname}")
+
+
+# ── 6m  Faceted ICE plots coloured by conditioning feature ───────────────────
+def plot_ice_faceted(
+    snaps: list[Snapshot],
+    hidden_dims: list[int],
+    dropout: float,
+    scaler: StandardScaler,
+    X_va_df: pd.DataFrame,
+    model_label: str = "model",
+    n_ice_samples: int = 100,
+) -> None:
+    """
+    Faceted ICE plots: rows = GT feature pairs, columns = epochs.
+    Each panel shows individual prediction curves for feature f1,
+    coloured by the observation's value of f2.
+    Fanning lines → modifier; crossing lines → crossover.
+    """
+    proxy_snaps = [s for s in snaps if s.model_state is not None]
+    if not proxy_snaps:
+        print("  [warn] no model states saved, skipping faceted ICE plots.")
+        return
+
+    pairs = GT_PAIRS[:3]  # keep readable
+    if not pairs:
+        print("  [warn] no GT_PAIRS, skipping faceted ICE.")
+        return
+
+    n_pairs  = len(pairs)
+    n_epochs = len(proxy_snaps)
+    grid_pts = 50
+
+    fig, axes = plt.subplots(n_pairs, n_epochs,
+                              figsize=(6 * n_epochs, 5 * n_pairs),
+                              squeeze=False)
+
+    # Sub-sample observations for ICE
+    X_ice = X_va_df.sample(min(n_ice_samples, len(X_va_df)), random_state=42)
+    X_ice_arr = X_ice.values.astype(np.float32)
+
+    for ei, snap in enumerate(proxy_snaps):
+        m = PurchaseNN(len(FEATURE_COLS), hidden_dims, dropout)
+        m.load_state_dict(snap.model_state)
+        m.eval()
+        w = ModelWrapper(m, scaler)
+
+        for pi, (f1, f2) in enumerate(pairs):
+            ax = axes[pi][ei]
+            i1 = FEATURE_COLS.index(f1)
+            i2 = FEATURE_COLS.index(f2)
+
+            f1_vals = X_ice_arr[:, i1]
+            f2_vals = X_ice_arr[:, i2]
+            grid = np.linspace(
+                np.percentile(f1_vals, 2),
+                np.percentile(f1_vals, 98),
+                grid_pts,
+            )
+
+            # Normalise f2 for colouring
+            f2_min, f2_max = f2_vals.min(), f2_vals.max()
+            f2_range = f2_max - f2_min if (f2_max - f2_min) > 1e-12 else 1.0
+            f2_norm = (f2_vals - f2_min) / f2_range
+
+            cmap = plt.cm.coolwarm
+
+            for obs_idx in range(len(X_ice_arr)):
+                row_tiled = np.tile(X_ice_arr[obs_idx], (grid_pts, 1))
+                row_tiled[:, i1] = grid
+                preds = w.predict_proba(row_tiled)[:, 1]
+                ax.plot(grid, preds, color=cmap(f2_norm[obs_idx]),
+                        alpha=0.3, linewidth=0.6)
+
+            ax.set_xlabel(f1, fontsize=9)
+            ax.set_ylabel("P(y=1)", fontsize=9)
+            if pi == 0:
+                ax.set_title(f"Epoch {snap.epoch}", fontsize=11, fontweight="bold")
+            if ei == 0:
+                ax.annotate(f"{f1}×{f2}", xy=(-0.35, 0.5),
+                            xycoords="axes fraction", fontsize=10,
+                            ha="center", va="center", rotation=90)
+
+    # Shared colourbar for f2
+    import matplotlib.cm as mcm
+    sm = plt.cm.ScalarMappable(cmap="coolwarm",
+                                norm=plt.Normalize(vmin=0, vmax=1))
+    sm.set_array([])
+    fig.subplots_adjust(right=0.92)
+    cbar_ax = fig.add_axes([0.94, 0.15, 0.015, 0.7])
+    fig.colorbar(sm, cax=cbar_ax, label="Conditioning feature value (normalised)")
+
+    fig.suptitle(f"{model_label} – ICE plots (colour = conditioning feature)",
+                 fontsize=14, y=1.01)
+    plt.tight_layout(rect=[0, 0, 0.92, 0.98])
+    fname = f"13_ice_faceted_{model_label}.png"
+    plt.savefig(OUTPUT_DIR / fname, dpi=DPI, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  saved: {fname}")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 7.  MAIN
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1025,6 +1391,18 @@ def main() -> None:
 
     # 9. Local explanation evolution
     plot_local_evolution(snaps, X_ex_raw, label)
+
+    # 10. H-statistic evolution (Friedman)
+    plot_h_statistic_evolution(snaps, HIDDEN_DIMS, DROPOUT, scaler, X_va_df, label)
+
+    # 11. Feature interaction network graphs
+    plot_interaction_network(snaps, label)
+
+    # 12. 2-D PDP time-lapse (unified colour scale)
+    plot_2d_pdp_timelapse(label, snaps, HIDDEN_DIMS, DROPOUT, scaler, X_va_df)
+
+    # 13. Faceted ICE plots
+    plot_ice_faceted(snaps, HIDDEN_DIMS, DROPOUT, scaler, X_va_df, label)
 
     ph("All outputs saved")
     for p in sorted(OUTPUT_DIR.glob("*.png")):
