@@ -406,10 +406,12 @@ def classify_interaction(
     3. Decision rules:
        - **crossover**:  slopes have opposite signs (the effect of f1
          reverses depending on whether f2 is low or high).
-       - **modifier**:   slopes share the same sign but one is ≥ 2×
-         the magnitude of the other (f2 amplifies / dampens f1's effect).
-       - **symmetric**:  slopes are similar in sign and magnitude
-         (f2 adds a level shift but does not reshape f1's influence).
+       - **modifier**:   slopes share the same sign but ratio > 2.0
+         (f2 heavily amplifies / dampens f1's effect).
+       - **additive**:   slopes share the same sign and ratio < 1.2
+         (nearly parallel lines → purely independent, zero interaction).
+       - **symmetric**:  catch-all for ratios between 1.2 and 2.0
+         (mutual but moderate interaction).
     """
     i1 = FEATURE_COLS.index(f1)
     i2 = FEATURE_COLS.index(f2)
@@ -440,13 +442,20 @@ def classify_interaction(
     if slope_low * slope_high < 0:
         return "crossover"
 
-    # Modifier: same direction but large magnitude ratio
+    # Ratio of the larger absolute slope to the smaller absolute slope
     abs_lo = abs(slope_low)
     abs_hi = abs(slope_high)
     ratio  = max(abs_lo, abs_hi) / max(min(abs_lo, abs_hi), 1e-12)
+
+    # Modifier: one feature heavily amplifies/dampens the other
     if ratio > 2.0:
         return "modifier"
 
+    # Additive: nearly parallel lines → purely independent, zero interaction
+    if ratio < 1.2:
+        return "additive"
+
+    # Symmetric: moderate mutual interaction (ratio between 1.2 and 2.0)
     return "symmetric"
 
 
