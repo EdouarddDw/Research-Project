@@ -91,7 +91,7 @@ def train(
     l2_const=0,
     learning_rate=0.01,
     opt_func=optim.Adam,
-    device=torch.device("cpu"),
+    device=torch.device("mps"),
 ):
     optimizer = opt_func(net.parameters(), lr=learning_rate, weight_decay=l2_const)
 
