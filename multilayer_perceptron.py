@@ -85,15 +85,41 @@ def train(
     criterion=nn.MSELoss(reduction="mean"),
     nepochs=100,
     verbose=False,
-    early_stopping=True,
+    early_stopping=False,
     patience=5,
     l1_const=1e-4,
     l2_const=0,
     learning_rate=0.01,
     opt_func=optim.Adam,
     device=torch.device("cpu"),
+    save_snapshots=False,
+    snapshot_epochs=None,
+    snapshot_dir="./outputs/snapshots",
 ):
+    """
+    Train the MLP model.
+    
+    Parameters
+    ----------
+    save_snapshots : bool
+        If True, save model weights at specified epochs.
+    snapshot_epochs : list of int, optional
+        Epochs at which to save snapshots. If None and save_snapshots=True,
+        defaults to [1, 2, 3, 5, 8, 10, 15, 20, 30, 50, 75, 100, 150, 200, 250, 300].
+    snapshot_dir : str
+        Directory to save snapshot files.
+    """
+    import os
+    
     optimizer = opt_func(net.parameters(), lr=learning_rate, weight_decay=l2_const)
+    
+    # Setup snapshot saving
+    snapshots = {}  # epoch -> state_dict
+    if save_snapshots:
+        if snapshot_epochs is None:
+            snapshot_epochs = [1, 2, 3, 5, 8, 10, 15, 20, 30, 50, 75, 100, 150, 200, 250, 300]
+        snapshot_epochs = [e for e in snapshot_epochs if e <= nepochs]
+        os.makedirs(snapshot_dir, exist_ok=True)
 
     def evaluate(net, data_loader, criterion, device):
         losses = []
@@ -116,6 +142,8 @@ def train(
         print("starting to train")
         if early_stopping:
             print("early stopping enabled")
+        if save_snapshots:
+            print(f"saving snapshots at epochs: {snapshot_epochs}")
 
     for epoch in range(nepochs):
         running_loss = 0.0
@@ -136,6 +164,15 @@ def train(
             optimizer.step()
             running_loss += loss.item()
             run_count += 1
+
+        # Save snapshot if enabled and this epoch is in the list (1-indexed)
+        current_epoch = epoch + 1
+        if save_snapshots and current_epoch in snapshot_epochs:
+            snapshot_path = os.path.join(snapshot_dir, f"model_epoch_{current_epoch}.pt")
+            torch.save(net.state_dict(), snapshot_path)
+            snapshots[current_epoch] = copy.deepcopy(net.state_dict())
+            if verbose:
+                print(f"  → Snapshot saved: {snapshot_path}")
 
         if epoch % 1 == 0:
             key = "val" if "val" in data_loaders else "train"
@@ -175,4 +212,7 @@ def train(
     if verbose:
         print("Finished Training. Test loss: ", test_loss)
 
+    # Return snapshots dict if snapshot saving was enabled
+    if save_snapshots:
+        return net, test_loss, snapshots
     return net, test_loss
