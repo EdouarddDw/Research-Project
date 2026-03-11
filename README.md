@@ -1,4 +1,10 @@
 # Research Project
+## synth.py usage
+
+```python
+    X, Y, ground_truth = synth.functions[3](num_samples=30000, seed=42, noise_std=0.1)
+```
+don't forget to set the noise_std (start off with 0.1 and go up from there
 
 All required Python packages are listed in `requirements.txt`.
 
@@ -37,3 +43,4 @@ Windows:
 ```bash
 pip install -r requirements.txt
 ```
+
