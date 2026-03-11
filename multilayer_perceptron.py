@@ -3,7 +3,7 @@ import numpy as np
 import torch.nn as nn
 import torch.optim as optim
 import copy
-
+import os
 
 def get_weights(model):
     weights = []
@@ -78,21 +78,22 @@ def create_mlp(layer_sizes, out_bias=True):
     layers.append(nn.Linear(int(ls[-2]), int(ls[-1]), bias=out_bias))
     return nn.Sequential(*layers)
 
-
 def train(
     net,
     data_loaders,
     criterion=nn.MSELoss(reduction="mean"),
     nepochs=100,
     verbose=False,
-    early_stopping=True,
+    early_stopping=False,
     patience=5,
     l1_const=1e-4,
     l2_const=0,
     learning_rate=0.01,
     opt_func=optim.Adam,
     device=torch.device("mps"),
-):
+    snapshot_dir=None,
+    snapshot_epochs = None):
+
     optimizer = opt_func(net.parameters(), lr=learning_rate, weight_decay=l2_const)
 
     def evaluate(net, data_loader, criterion, device):
@@ -137,29 +138,39 @@ def train(
             running_loss += loss.item()
             run_count += 1
 
+        current_epoch = epoch + 1
+
         if epoch % 1 == 0:
             key = "val" if "val" in data_loaders else "train"
             val_loss = evaluate(net, data_loaders[key], criterion, device)
 
-            if epoch % 2 == 0:
-                if verbose:
-                    print(
-                        "[epoch %d, total %d] train loss: %.4f, val loss: %.4f"
-                        % (epoch + 1, nepochs, running_loss / run_count, val_loss)
-                    )
-            if early_stopping:
-                if val_loss < best_loss:
-                    best_loss = val_loss
-                    best_net = copy.deepcopy(net)
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-                    if patience_counter > patience:
-                        net = best_net
-                        val_loss = best_loss
-                        if verbose:
-                            print("early stopping!")
-                        break
+        if snapshot_dir is not None:
+            if snapshot_epochs is None or current_epoch in snapshot_epochs:
+                os.makedirs(snapshot_dir, exist_ok=True)
+                torch.save(
+                    net.state_dict(),
+                    os.path.join(snapshot_dir, f"model_epoch_{current_epoch}.pt")
+                )
+
+        if verbose and (snapshot_epochs is None or current_epoch in snapshot_epochs):
+            print(
+                "[epoch %d, total %d] train loss: %.4f, val loss: %.4f"
+                % (current_epoch, nepochs, running_loss / run_count, val_loss)
+            )
+
+        if early_stopping:
+            if val_loss < best_loss:
+                best_loss = val_loss
+                best_net = copy.deepcopy(net)
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter > patience:
+                    net = best_net
+                    val_loss = best_loss
+                    if verbose:
+                         print("early stopping!")
+                    break
 
             prev_loss = running_loss
             running_loss = 0.0
