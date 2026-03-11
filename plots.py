@@ -137,31 +137,3 @@ def plot_shap_importance_vs_epoch(epochs, importance_matrix, feature_names, save
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
     plt.close()
-
-def plot_noise_vs_true_importance(epochs, importance_matrix, feature_names, save_path):
-    # detect true vs noise features from names
-    true_idx = [i for i,f in enumerate(feature_names) if "true" in f or f in ["x1","x2","x3","x4","x5"]]
-    noise_idx = [i for i,f in enumerate(feature_names) if "noise" in f or f in ["x6","x7","x8","x9","x10"]]
-
-    true_importance = np.mean(importance_matrix[:, true_idx], axis=1)
-    noise_importance = np.mean(importance_matrix[:, noise_idx], axis=1)
-
-    plt.figure(figsize=(8,5))
-
-    plt.plot(epochs, true_importance,
-             marker="o",
-             linewidth=2,
-             label="True features")
-    plt.plot(epochs, noise_importance,
-             marker="o",
-             linewidth=2,
-             label="Noise features")
-
-    plt.xlabel("Epoch")
-    plt.ylabel("Mean |SHAP|")
-    plt.title("True vs Noise Feature Importance")
-    plt.grid(alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    plt.close()
