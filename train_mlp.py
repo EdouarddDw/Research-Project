@@ -7,7 +7,8 @@ from multilayer_perceptron import MLP, train
 import synth
 
 SEED = 42
-N_SAMPLES = 3000 # adjust to 30000 for final runs
+N_SAMPLES = 30000 # adjust to 30000 for final runs
+NOISE_STD =0.1
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 snapshot_root = "./outputs/snapshots/f3"
@@ -44,7 +45,7 @@ def run_training(run_name, l2_const=0):
 
     print(f"\nTraining run: {run_name}")
 
-    X, Y, ground_truth = synth.functions[3](num_samples=N_SAMPLES, seed=42)
+    X, Y, ground_truth = synth.functions[3](num_samples=N_SAMPLES, seed=42, noise_std=NOISE_STD)
 
     data_loaders = build_dataloaders(X, Y)
 
@@ -74,8 +75,7 @@ def run_training(run_name, l2_const=0):
     print("Final test loss:", test_loss)
 
 def main():
-    run_training("unregularized", l2_const=0)
-    run_training("l2", l2_const=1e-4)
+    run_training("l1", l2_const=0)
 
 if __name__ == "__main__":
     main()
