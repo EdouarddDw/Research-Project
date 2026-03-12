@@ -2,8 +2,7 @@
 analyze_shap_snapshots.py
 =========================
 
-Compute SHAP explanations for MLP snapshots produced by
-train_mlp_snapshots.py.
+Compute SHAP explanations for MLP snapshots trained on synth.functions[3].
 """
 
 import os
@@ -13,11 +12,19 @@ import torch
 import shap
 from pathlib import Path
 
-from plots import plot_shap_summary, plot_shap_bar, plot_shap_importance_vs_epoch, plot_noise_vs_true_importance
+import synth
+from train_mlp_snapshots import MLP, SEED, N_SAMPLES
+
+from plots import plot_shap_summary, plot_shap_bar, plot_shap_importance_vs_epoch
 
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
+
+SNAPSHOT_ROOT = "./outputs/snapshots/f3"
+OUTPUT_ROOT   = "./outputs/shap_analysis/f3"
+
+RUN_NAME = "l1"
 
 BACKGROUND_SIZE = 100
 EVAL_SIZE       = 500
@@ -30,13 +37,11 @@ torch.manual_seed(SEED)
 os.makedirs(OUTPUT_ROOT, exist_ok=True)
 
 # ─────────────────────────────────────────────
-# MODEL WRAPPER (Fix for SHAP)
+# MODEL WRAPPER
 # ─────────────────────────────────────────────
+
 class ModelWrapper(torch.nn.Module):
-    """
-    SHAP requires model outputs to have shape (batch, outputs).
-    Our model returns (batch,), so we add an extra dimension.
-    """
+
     def __init__(self, model):
         super().__init__()
         self.model = model
@@ -45,9 +50,11 @@ class ModelWrapper(torch.nn.Module):
         out = self.model(x)
         return out.unsqueeze(1)
 
+
 # ─────────────────────────────────────────────
-# FIND SNAPSHOTS
+# SNAPSHOT DISCOVERY
 # ─────────────────────────────────────────────
+
 def discover_snapshots(folder):
     pattern = re.compile(r"model_epoch_(\d+)\.pt$")
     snapshots = []
@@ -58,66 +65,83 @@ def discover_snapshots(folder):
     snapshots.sort(key=lambda x: x[0])
     return snapshots
 
+# ─────────────────────────────────────────────
+# SHAP ANALYSIS
+# ─────────────────────────────────────────────
 
-# ─────────────────────────────────────────────
-# SHAP ANALYSIS FOR ONE RUN
-# ─────────────────────────────────────────────
 def analyze_run(run_name):
     print(f"\nAnalyzing run: {run_name}")
     snapshot_dir = os.path.join(SNAPSHOT_ROOT, run_name)
     output_dir   = os.path.join(OUTPUT_ROOT, run_name)
     os.makedirs(output_dir, exist_ok=True)
     snapshots = discover_snapshots(snapshot_dir)
+
+    if len(snapshots) == 0:
+        print(f"No snapshots found in {snapshot_dir}")
+        return
+
     print(f"Found {len(snapshots)} snapshots")
 
-    # Load dataset (same generation as training)
+    # SAME DATA GENERATION AS TRAINING
+    X, Y, ground_truth = synth.functions[3](num_samples=N_SAMPLES, seed=SEED)
+
     feature_names = [f"x{i+1}" for i in range(X.shape[1])]
 
-    # Random subsets for SHAP
+    # SHAP subsets
     rng = np.random.default_rng(SEED)
     idx = rng.permutation(len(X))
+
     bg_idx   = idx[:BACKGROUND_SIZE]
     eval_idx = idx[BACKGROUND_SIZE:BACKGROUND_SIZE + EVAL_SIZE]
-    X_bg   = torch.tensor(X[bg_idx])
-    X_eval = torch.tensor(X[eval_idx])
+
+    X_bg   = torch.tensor(X[bg_idx], dtype=torch.float32)
+    X_eval = torch.tensor(X[eval_idx], dtype=torch.float32)
 
     epoch_importance = {}
+    # ─────────────────────────────────────────
+    # LOOP OVER SNAPSHOTS
+    # ─────────────────────────────────────────
     for epoch, path in snapshots:
         print(f"  Epoch {epoch}")
-
-        # Rebuild model
-        model.load_state_dict(torch.load(path))
+        model = MLP(
+            num_features=X.shape[1],
+            hidden_units=HIDDEN,
+            use_main_effect_nets=False
+        )
+        model.load_state_dict(torch.load(path, map_location="cpu"))
         model.eval()
 
-        # Wrap model so SHAP receives (batch,1) output
         wrapped_model = ModelWrapper(model)
 
-        # SHAP computation
         explainer = shap.GradientExplainer(wrapped_model, X_bg)
+
         shap_vals = explainer.shap_values(X_eval)
         shap_vals = np.array(shap_vals).squeeze()
 
-        # Global feature importance
         importance = np.mean(np.abs(shap_vals), axis=0)
         epoch_importance[epoch] = importance
 
-        # Save raw SHAP values
-        np.save(os.path.join(output_dir, f"shap_epoch_{epoch}.npy"), shap_vals)
+        np.save(
+            os.path.join(output_dir, f"shap_epoch_{epoch}.npy"),
+            shap_vals
+        )
 
     epochs = sorted(epoch_importance.keys())
-    importance_matrix = np.vstack([epoch_importance[e] for e in epochs])
+    importance_matrix = np.vstack(
+        [epoch_importance[e] for e in epochs]
+    )
 
-    # Select early / mid / late epochs (Could change values later)**********************************************
     selected_epochs = [
-        epochs[0],  # early training
-        epochs[len(epochs)//2],  #"optimal" training
-        epochs[-1]  # logical decay
+        epochs[0],
+        epochs[len(epochs)//2],
+        epochs[-1]
     ]
 
     for ep in selected_epochs:
-        shap_vals = np.load(os.path.join(output_dir, f"shap_epoch_{ep}.npy"))
+        shap_vals = np.load(
+            os.path.join(output_dir, f"shap_epoch_{ep}.npy")
+        )
         imp = epoch_importance[ep]
-
         plot_shap_summary(
             shap_vals,
             X_eval.numpy(),
@@ -125,28 +149,25 @@ def analyze_run(run_name):
             os.path.join(output_dir, f"summary_epoch_{ep}.png"),
             f"SHAP Summary — Epoch {ep}"
         )
-
         plot_shap_bar(
             imp,
             feature_names,
             os.path.join(output_dir, f"bar_epoch_{ep}.png"),
             f"Feature Importance — Epoch {ep}"
         )
-
-        plot_shap_importance_vs_epoch(
-            epochs,
-            importance_matrix,
-            feature_names,
-            os.path.join(output_dir, "importance_vs_epoch.png")
-        )
+    plot_shap_importance_vs_epoch(
+        epochs,
+        importance_matrix,
+        feature_names,
+        os.path.join(output_dir, "importance_vs_epoch.png")
+    )
 
     print(f"Results saved to {output_dir}")
 
-
 def main():
-    analyze_run("unregularized")
-    analyze_run("l2")
+    analyze_run(RUN_NAME)
     print("\nSHAP analysis complete.")
+
 
 if __name__ == "__main__":
     main()
