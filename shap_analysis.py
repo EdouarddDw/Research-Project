@@ -87,13 +87,19 @@ def analyze_run(run_name):
 
     feature_names = [f"x{i+1}" for i in range(X.shape[1])]
 
-    # SHAP subsets
-    rng = np.random.default_rng(SEED)
-    idx = rng.permutation(len(X))
-    bg_idx   = idx[:BACKGROUND_SIZE]
-    eval_idx = idx[BACKGROUND_SIZE:BACKGROUND_SIZE + EVAL_SIZE]
-    X_bg   = torch.tensor(X[bg_idx], dtype=torch.float32)
-    X_eval = torch.tensor(X[eval_idx], dtype=torch.float32)
+    # SHAP on samples from different distribution than training
+    from sklearn.model_selection import train_test_split
+    # split dataset (same proportions as training)
+    X_train, X_temp, y_train, y_temp = train_test_split(
+        X, Y, test_size=0.30, random_state=SEED
+    )
+    X_val, X_test, y_val, y_test = train_test_split(
+        X_temp, y_temp, test_size=0.50, random_state=SEED
+    )
+    # SHAP background: training distribution
+    X_bg = torch.tensor(X_train[:BACKGROUND_SIZE], dtype=torch.float32)
+    # SHAP evaluation: unseen validation data
+    X_eval = torch.tensor(X_val[:EVAL_SIZE], dtype=torch.float32)
 
     # Save evaluation data so animation can reuse it for coloring
     np.save(os.path.join(output_dir, "X_eval.npy"), X_eval.numpy())
