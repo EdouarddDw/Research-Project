@@ -26,8 +26,8 @@ OUTPUT_ROOT   = "./outputs/shap_analysis/f3"
 
 RUN_NAME = "l1"
 
-BACKGROUND_SIZE = 100
-EVAL_SIZE       = 500
+BACKGROUND_SIZE = 500
+EVAL_SIZE       = 1000
 
 HIDDEN = [140, 100, 60, 20]
 
@@ -48,7 +48,7 @@ class ModelWrapper(torch.nn.Module):
 
     def forward(self, x):
         out = self.model(x)
-        return out.unsqueeze(1)
+        return out
 
 
 # ─────────────────────────────────────────────
@@ -90,12 +90,13 @@ def analyze_run(run_name):
     # SHAP subsets
     rng = np.random.default_rng(SEED)
     idx = rng.permutation(len(X))
-
     bg_idx   = idx[:BACKGROUND_SIZE]
     eval_idx = idx[BACKGROUND_SIZE:BACKGROUND_SIZE + EVAL_SIZE]
-
     X_bg   = torch.tensor(X[bg_idx], dtype=torch.float32)
     X_eval = torch.tensor(X[eval_idx], dtype=torch.float32)
+
+    # Save evaluation data so animation can reuse it for coloring
+    np.save(os.path.join(output_dir, "X_eval.npy"), X_eval.numpy())
 
     epoch_importance = {}
     # ─────────────────────────────────────────
@@ -116,9 +117,15 @@ def analyze_run(run_name):
         explainer = shap.GradientExplainer(wrapped_model, X_bg)
 
         shap_vals = explainer.shap_values(X_eval)
+
+        if isinstance(shap_vals, list):
+            shap_vals = shap_vals[0]
+
         shap_vals = np.array(shap_vals).squeeze()
 
-        importance = np.mean(np.abs(shap_vals), axis=0)
+        importance = np.mean(np.abs(shap_vals), axis=0).flatten()
+        importance = importance / np.sum(importance) #normalising values
+
         epoch_importance[epoch] = importance
 
         np.save(
@@ -142,6 +149,7 @@ def analyze_run(run_name):
             os.path.join(output_dir, f"shap_epoch_{ep}.npy")
         )
         imp = epoch_importance[ep]
+
         plot_shap_summary(
             shap_vals,
             X_eval.numpy(),
@@ -149,6 +157,7 @@ def analyze_run(run_name):
             os.path.join(output_dir, f"summary_epoch_{ep}.png"),
             f"SHAP Summary — Epoch {ep}"
         )
+
         plot_shap_bar(
             imp,
             feature_names,
