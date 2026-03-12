@@ -92,7 +92,7 @@ def train(
         learning_rate=0.01,
         opt_func=optim.Adam,
         device=torch.device("cpu"),
-        save_snapshots=False,
+        save_snapshots=True,
         snapshot_epochs=None,
         snapshot_dir="./outputs/snapshots",
 ):
@@ -171,8 +171,6 @@ def train(
             snapshot_path = os.path.join(snapshot_dir, f"model_epoch_{current_epoch}.pt")
             torch.save(net.state_dict(), snapshot_path)
             snapshots[current_epoch] = copy.deepcopy(net.state_dict())
-            if verbose:
-                print(f"  → Snapshot saved: {snapshot_path}")
 
         if epoch % 1 == 0:
             key = "val" if "val" in data_loaders else "train"

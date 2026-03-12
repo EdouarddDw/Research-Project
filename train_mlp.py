@@ -45,7 +45,7 @@ def run_training(run_name, l2_const=0):
 
     print(f"\nTraining run: {run_name}")
 
-    X, Y, ground_truth = synth.functions[3](num_samples=N_SAMPLES, seed=42, noise_std=NOISE_STD)
+    X, Y, ground_truth = synth.functions[3](num_samples=N_SAMPLES, seed=SEED, noise_std=NOISE_STD)
 
     data_loaders = build_dataloaders(X, Y)
 
@@ -60,7 +60,7 @@ def run_training(run_name, l2_const=0):
 
     snapshot_dir = os.path.join(snapshot_root, run_name)
 
-    net, test_loss = train(
+    net, test_loss, snapshots = train(
         net,
         data_loaders,
         nepochs=300,

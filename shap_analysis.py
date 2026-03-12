@@ -13,7 +13,7 @@ import shap
 from pathlib import Path
 
 import synth
-from train_mlp_snapshots import MLP, SEED, N_SAMPLES
+from train_mlp import MLP, SEED, N_SAMPLES, NOISE_STD
 
 from plots import plot_shap_summary, plot_shap_bar, plot_shap_importance_vs_epoch
 
@@ -83,7 +83,7 @@ def analyze_run(run_name):
     print(f"Found {len(snapshots)} snapshots")
 
     # SAME DATA GENERATION AS TRAINING
-    X, Y, ground_truth = synth.functions[3](num_samples=N_SAMPLES, seed=SEED)
+    X, Y, ground_truth = synth.functions[3](num_samples=N_SAMPLES, seed=SEED, noise_std=NOISE_STD)
 
     feature_names = [f"x{i+1}" for i in range(X.shape[1])]
 
