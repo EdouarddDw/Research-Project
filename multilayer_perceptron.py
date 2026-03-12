@@ -178,12 +178,14 @@ def train(
             key = "val" if "val" in data_loaders else "train"
             val_loss = evaluate(net, data_loaders[key], criterion, device)
 
-            if epoch % 2 == 0:
-                if verbose:
-                    print(
-                        "[epoch %d, total %d] train loss: %.4f, val loss: %.4f"
-                        % (epoch + 1, nepochs, running_loss / run_count, val_loss)
-                    )
+            current_epoch = epoch + 1
+
+            if verbose and snapshot_epochs is not None and current_epoch in snapshot_epochs:
+                print(
+                    "[epoch %d, total %d] train loss: %.4f, val loss: %.4f"
+                    % (current_epoch, nepochs, running_loss / run_count, val_loss)
+                )
+
             if early_stopping:
                 if val_loss < best_loss:
                     best_loss = val_loss
