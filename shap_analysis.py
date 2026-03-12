@@ -13,14 +13,11 @@ import torch
 import shap
 from pathlib import Path
 
-from train_mlp_snapshots import generate_data, MLP, N_SAMPLES, N_TRUE, N_NOISE, SEED
 from plots import plot_shap_summary, plot_shap_bar, plot_shap_importance_vs_epoch, plot_noise_vs_true_importance
 
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
-SNAPSHOT_ROOT = "./outputs/snapshots"
-OUTPUT_ROOT   = "./outputs/shap_analysis"
 
 BACKGROUND_SIZE = 100
 EVAL_SIZE       = 500
@@ -74,8 +71,6 @@ def analyze_run(run_name):
     print(f"Found {len(snapshots)} snapshots")
 
     # Load dataset (same generation as training)
-    data = generate_data(N_SAMPLES, N_TRUE, N_NOISE, seed=SEED)
-    X = data["X"]
     feature_names = [f"x{i+1}" for i in range(X.shape[1])]
 
     # Random subsets for SHAP
@@ -91,7 +86,6 @@ def analyze_run(run_name):
         print(f"  Epoch {epoch}")
 
         # Rebuild model
-        model = MLP(X.shape[1], hidden=HIDDEN)
         model.load_state_dict(torch.load(path))
         model.eval()
 
@@ -112,13 +106,6 @@ def analyze_run(run_name):
 
     epochs = sorted(epoch_importance.keys())
     importance_matrix = np.vstack([epoch_importance[e] for e in epochs])
-
-    plot_noise_vs_true_importance(
-        epochs,
-        importance_matrix,
-        feature_names,
-        os.path.join(output_dir, "noise_vs_true_importance.png")
-    )
 
     # Select early / mid / late epochs (Could change values later)**********************************************
     selected_epochs = [
