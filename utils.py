@@ -147,3 +147,105 @@ def print_rankings(pairwise_interactions, anyorder_interactions, top_k=10, spaci
 
 def justify(row, spacing=14):
     return "".join(str(item).ljust(spacing) for item in row)
+
+
+def load_snapshots(snapshot_dir: str, snapshot_epochs: list, device: str = "cpu") -> dict:
+    """Load model snapshots from disk.
+    
+    Args:
+        snapshot_dir: Directory containing snapshot .pt files.
+        snapshot_epochs: List of epoch numbers to load.
+        device: Device to map tensors to (default: 'cpu').
+    
+    Returns:
+        Dictionary mapping epoch number to state_dict.
+    """
+    import os
+    snapshots = {}
+    for epoch in snapshot_epochs:
+        snapshot_path = os.path.join(snapshot_dir, f"model_epoch_{epoch}.pt")
+        if os.path.exists(snapshot_path):
+            snapshots[epoch] = torch.load(snapshot_path, map_location=device, weights_only=True)
+    return snapshots
+
+
+def create_interaction_animation(
+    pairwise_matrices: dict,
+    anyorder_matrices: dict,
+    available_epochs: list,
+    labels: list,
+    vmax_pw: float,
+    vmax_ao: float,
+    figsize: tuple = (14, 6),
+):
+    """Create side-by-side animated heatmaps for pairwise and any-order interactions.
+    
+    Args:
+        pairwise_matrices: Dict mapping epoch -> pairwise interaction matrix.
+        anyorder_matrices: Dict mapping epoch -> any-order interaction matrix.
+        available_epochs: Sorted list of epoch numbers.
+        labels: List of variable labels (e.g., ['x_1', 'x_2', ...]).
+        vmax_pw: Max value for pairwise colorscale.
+        vmax_ao: Max value for any-order colorscale.
+        figsize: Figure size tuple.
+    
+    Returns:
+        (fig, update_func) tuple for use with FuncAnimation.
+    """
+    import matplotlib.pyplot as plt
+    
+    num_features = len(labels)
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+    
+    # Initial heatmaps
+    im_pw = axes[0].imshow(pairwise_matrices[available_epochs[0]], cmap="viridis",
+                           vmin=0, vmax=vmax_pw)
+    im_ao = axes[1].imshow(anyorder_matrices[available_epochs[0]], cmap="magma",
+                           vmin=0, vmax=vmax_ao)
+    
+    # Axis labels
+    for ax in axes:
+        ax.set_xticks(np.arange(num_features))
+        ax.set_yticks(np.arange(num_features))
+        ax.set_xticklabels(labels)
+        ax.set_yticklabels(labels)
+        plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+    
+    axes[0].set_title("Pairwise Interactions")
+    axes[1].set_title("Any-Order Interactions")
+    
+    fig.colorbar(im_pw, ax=axes[0], label="Strength", fraction=0.046, pad=0.04)
+    fig.colorbar(im_ao, ax=axes[1], label="Strength", fraction=0.046, pad=0.04)
+    
+    title = fig.suptitle(f"Epoch {available_epochs[0]}", fontsize=14, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    
+    # Text annotations
+    annot_pw = [[axes[0].text(j, i, "", ha="center", va="center", fontsize=7)
+                 for j in range(num_features)] for i in range(num_features)]
+    annot_ao = [[axes[1].text(j, i, "", ha="center", va="center", fontsize=7)
+                 for j in range(num_features)] for i in range(num_features)]
+    
+    def update(frame_idx):
+        epoch = available_epochs[frame_idx]
+        pw_mat = pairwise_matrices[epoch]
+        ao_mat = anyorder_matrices[epoch]
+        
+        im_pw.set_data(pw_mat)
+        im_ao.set_data(ao_mat)
+        title.set_text(f"Epoch {epoch}")
+        
+        # Update annotations
+        for i in range(num_features):
+            for j in range(num_features):
+                val_pw = pw_mat[i, j]
+                val_ao = ao_mat[i, j]
+                annot_pw[i][j].set_text(f"{val_pw:.1f}" if val_pw > 0.05 else "")
+                annot_ao[i][j].set_text(f"{val_ao:.1f}" if val_ao > 0.05 else "")
+                # Contrast color
+                annot_pw[i][j].set_color("white" if val_pw > vmax_pw * 0.5 else "black")
+                annot_ao[i][j].set_color("white" if val_ao > vmax_ao * 0.5 else "black")
+        
+        return [im_pw, im_ao, title] + [a for row in annot_pw for a in row] + [a for row in annot_ao for a in row]
+    
+    return fig, update
