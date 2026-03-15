@@ -3,19 +3,21 @@ pdp_analysis.py
 ========================
 
 Partial Dependence Plot (PDP) analysis for MLP snapshots.
-Improved version with publication-quality matplotlib styling.
+Publication-quality matplotlib styling and static PNG figures.
 
 Run AFTER train_mlp_snapshots.py has generated model snapshots in:
     outputs/snapshots/unregularized/model_epoch_{N}.pt
 
 Generated figures (saved under ./outputs/snapshots/):
-    - pdp_1d_evolution.png          — 1D PDP curves for true features across epochs
-    - pdp_2d_modifier.png           — 2D heatmap: modifier interaction (x0, x1)
-    - pdp_2d_crossover.png          — 2D heatmap: crossover interaction (x2, x3)
-    - pdp_modifier_vs_crossover.png — side-by-side interaction signature comparison
+    - pdp_1d_evolution.png       — 1D PDP grid (signal features × epochs)
+    - pdp_2d_grid.png            — 2D PDP grid (GT pairs × selected epochs)
+    - pdp_interaction_signature.png — conditional PDP curves (static)
+
+For GIF animations run separately: python pdp_gifs.py
 """
 
 import os
+import pickle
 import numpy as np
 import torch
 import matplotlib
@@ -24,19 +26,30 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 from matplotlib.colors import TwoSlopeNorm
 from matplotlib.lines import Line2D
-
-from train_mlp_snapshots import generate_data, MLP, N_FEATURES, SEED
-
+from multilayer_perceptron import MLP
+from train_mlp_snapshots import (
+    generate_data_from_synth,
+    SYNTH_FN_IDX,
+    NOISE_STD,
+    NUM_FEATURES,
+    NUM_SAMPLES,
+    HIDDEN_UNITS,
+    USE_MAIN_EFFECT_NETS,
+    SEED,
+    SNAPSHOT_EPOCHS,
+)
 
 # ─────────────────────────────────────────────────────────────
-# GLOBAL STYLE — academic / publication look
+# GLOBAL STYLE — typography, layout, colours
 # ─────────────────────────────────────────────────────────────
 plt.rcParams.update({
     "font.family":        "DejaVu Serif",
     "font.size":          10,
-    "axes.titlesize":     11,
-    "axes.labelsize":     10,
+    "axes.titlesize":     10,
     "axes.titleweight":   "bold",
+    "axes.labelsize":     10,
+    "xtick.labelsize":     9,
+    "ytick.labelsize":     9,
     "axes.spines.top":    False,
     "axes.spines.right":  False,
     "axes.grid":          True,
@@ -53,10 +66,7 @@ plt.rcParams.update({
     "savefig.facecolor":  "white",
 })
 
-# Colour palettes
-EPOCH_COLORS = ["#d62728", "#ff7f0e", "#2ca02c", "#1f77b4", "#9467bd"]  # red→purple
-COND_COLORS  = ["#e41a1c", "#377eb8", "#4daf4a"]   # red / blue / green
-
+COND_COLORS = ["#e41a1c", "#377eb8", "#4daf4a"]  # for conditioned curves
 
 # ─────────────────────────────────────────────────────────────
 # CONFIG
@@ -64,13 +74,17 @@ COND_COLORS  = ["#e41a1c", "#377eb8", "#4daf4a"]   # red / blue / green
 BASE_OUTPUT_DIR    = "./outputs/snapshots"
 UNREG_SNAPSHOT_DIR = os.path.join(BASE_OUTPUT_DIR, "unregularized")
 
-SNAPSHOT_EPOCHS_1D  = [1, 10, 50, 100, 300]
-SNAPSHOT_EPOCHS_2D  = [1, 50, 300]
-INTERACTION_EPOCH   = 300
+# Subset of epochs for static 1D PDP (clear legend) and 2D grid columns
+SNAPSHOT_EPOCHS_1D = [1, 10, 30, 75, 150, 300]
+GRID_EPOCHS_2D     = [1, 10, 30, 75, 150, 300]   # columns in pdp_2d_grid.png
+INTERACTION_EPOCH  = 300
 
 GRID_POINTS_1D = 60
-GRID_POINTS_2D = 40
-MC_MAX_SAMPLES = 1000
+GRID_POINTS_2D = 30   # 30×30 быстрее 40×40, картинка чуть грубее
+MC_MAX_SAMPLES = 600  # меньше сэмплов = быстрее 2D PDP и GIF
+GIF_DPI = 100
+GIF_FPS = 4
+GIF_INTERVAL_MS = 250
 
 
 # ─────────────────────────────────────────────────────────────
@@ -85,13 +99,21 @@ def ensure_dirs():
         )
 
 
+def load_meta():
+    """Load feature_names and ground_truth from meta.pkl saved by train_mlp_snapshots."""
+    meta_path = os.path.join(UNREG_SNAPSHOT_DIR, "meta.pkl")
+    with open(meta_path, "rb") as f:
+        meta = pickle.load(f)
+    return meta["feature_names"], meta["ground_truth"]
+
+
 def load_unreg_models(epochs):
     models = {}
     for epoch in epochs:
         path = os.path.join(UNREG_SNAPSHOT_DIR, f"model_epoch_{epoch}.pt")
         if not os.path.exists(path):
             raise FileNotFoundError(f"Missing snapshot: {path}")
-        model = MLP(N_FEATURES)
+        model = MLP(NUM_FEATURES, HIDDEN_UNITS, use_main_effect_nets=USE_MAIN_EFFECT_NETS)
         model.load_state_dict(torch.load(path, map_location="cpu"))
         model.eval()
         models[epoch] = model
@@ -100,7 +122,7 @@ def load_unreg_models(epochs):
 
 
 def get_background_data(mc_max_samples=MC_MAX_SAMPLES):
-    data = generate_data(n_samples=3000, n_true=5, n_noise=5, seed=SEED)
+    data = generate_data_from_synth(SYNTH_FN_IDX, NUM_SAMPLES, SEED, NOISE_STD)
     X = data["X"]
     feature_names = data["feature_names"]
     rng = np.random.RandomState(SEED)
@@ -112,7 +134,8 @@ def get_background_data(mc_max_samples=MC_MAX_SAMPLES):
 
 def model_predict(model, X):
     with torch.no_grad():
-        preds = model(torch.from_numpy(X.astype(np.float32))).cpu().numpy()
+        preds = model(torch.from_numpy(X.astype(np.float32)))
+        preds = preds.squeeze(-1).cpu().numpy()
     return preds
 
 
@@ -126,8 +149,10 @@ def compute_1d_pdp(model, X_bg, feature_idx, grid):
 
 
 def compute_2d_pdp(model, X_bg, i, j, grid_points=GRID_POINTS_2D):
-    xs = np.linspace(0.0, 1.0, grid_points)
-    ys = np.linspace(0.0, 1.0, grid_points)
+    x_min, x_max = X_bg[:, i].min(), X_bg[:, i].max()
+    y_min, y_max = X_bg[:, j].min(), X_bg[:, j].max()
+    xs = np.linspace(x_min, x_max, grid_points)
+    ys = np.linspace(y_min, y_max, grid_points)
     X_mod = X_bg.copy()
     Z = np.zeros((grid_points, grid_points), dtype=np.float32)
     for ix, xv in enumerate(xs):
@@ -140,7 +165,8 @@ def compute_2d_pdp(model, X_bg, i, j, grid_points=GRID_POINTS_2D):
 
 def compute_interaction_curves(model, X_bg, var_idx, cond_idx, cond_values,
                                 grid_points=GRID_POINTS_1D):
-    grid = np.linspace(0.0, 1.0, grid_points)
+    v_min, v_max = X_bg[:, var_idx].min(), X_bg[:, var_idx].max()
+    grid = np.linspace(v_min, v_max, grid_points)
     X_mod = X_bg.copy()
     curves = {}
     for c in cond_values:
@@ -154,55 +180,70 @@ def compute_interaction_curves(model, X_bg, var_idx, cond_idx, cond_values,
 
 
 # ─────────────────────────────────────────────────────────────
-# PLOT 1 — 1D PDP Evolution
+# PLOT 1 — 1D PDP Evolution (grid layout)
 # ─────────────────────────────────────────────────────────────
-def plot_1d_pdp_evolution(models, X_bg, feature_names):
+def plot_1d_pdp_evolution(models, X_bg, feature_names, true_idx):
     """
-    1D PDP for true features (x0–x4) across training epochs.
-    Each subplot shows how the model's perception of a feature evolves.
+    1D PDP for signal features across training epochs.
+    Grid: 2 rows if >5 features, else 1 row. Epoch colours from viridis.
     """
-    epochs  = sorted(models.keys())
-    grid    = np.linspace(0.0, 1.0, GRID_POINTS_1D)
-    n_true  = 5
+    epochs = sorted(models.keys())
+    n_true = len(true_idx)
+    if n_true == 0:
+        print("  [pdp] No true_idx; skipping 1D PDP evolution.")
+        return
 
-    fig, axes = plt.subplots(1, n_true, figsize=(14, 3.6), sharey=False)
+    nrows = 2 if n_true > 5 else 1
+    ncols = (n_true + 1) // 2 if n_true > 5 else n_true
+    fig, axes = plt.subplots(
+        nrows, ncols,
+        figsize=(max(3 * ncols, 9), 3.5 * nrows),
+        sharey=False,
+        constrained_layout=True,
+    )
+    if n_true == 1:
+        axes = np.array([axes])
+    axes_flat = axes.flatten() if n_true > 1 else axes
+
+    cmap = plt.cm.viridis
+    epoch_norm = np.linspace(0.15, 0.85, len(epochs)) if len(epochs) > 1 else [0.5]
+
     fig.suptitle(
         "1D Partial Dependence Plots — Feature Effect Evolution During Training",
-        fontsize=12, fontweight="bold", y=1.01
+        fontsize=13, fontweight="bold", y=1.02
     )
 
-    for feat_idx in range(n_true):
-        ax = axes[feat_idx]
-        for color, epoch in zip(EPOCH_COLORS, epochs):
+    for ax_idx in range(len(true_idx)):
+        feat_idx = true_idx[ax_idx]
+        ax = axes_flat[ax_idx]
+        v_min, v_max = X_bg[:, feat_idx].min(), X_bg[:, feat_idx].max()
+        grid = np.linspace(v_min, v_max, GRID_POINTS_1D)
+        for ei, epoch in enumerate(epochs):
+            c = cmap(epoch_norm[ei]) if len(epochs) > 1 else cmap(0.5)
             pdp_vals = compute_1d_pdp(models[epoch], X_bg, feat_idx, grid)
-            ax.plot(grid, pdp_vals, color=color, linewidth=1.8,
-                    label=f"Epoch {epoch}", alpha=0.9)
+            ax.plot(grid, pdp_vals, color=c, linewidth=1.8, label=f"Epoch {epoch}", alpha=0.9)
 
-        # Feature-specific annotations
         ax.set_xlabel(feature_names[feat_idx], fontsize=10)
-        ax.set_title(f"Feature x{feat_idx}", pad=6)
-        ax.xaxis.set_major_locator(ticker.MultipleLocator(0.25))
+        ax.set_title(f"Feature x{feat_idx}", fontsize=10, fontweight="bold", pad=6)
+        ax.xaxis.set_major_locator(ticker.MaxNLocator(6))
         ax.xaxis.set_major_formatter(ticker.FormatStrFormatter("%.2f"))
-
-        if feat_idx == 0:
+        if ax_idx % ncols == 0:
             ax.set_ylabel("Avg. Model Output (PDP)", fontsize=10)
 
-        # Light shading between min/max across epochs to show uncertainty band
         pdp_matrix = np.array([
             compute_1d_pdp(models[e], X_bg, feat_idx, grid) for e in epochs
         ])
-        ax.fill_between(grid, pdp_matrix.min(0), pdp_matrix.max(0),
-                         alpha=0.10, color="#888888")
+        ax.fill_between(grid, pdp_matrix.min(0), pdp_matrix.max(0), alpha=0.10, color="#888888")
 
-    # Shared legend below all subplots
+    for ax_idx in range(len(true_idx), len(axes_flat)):
+        axes_flat[ax_idx].set_visible(False)
+
     handles = [
-        Line2D([0], [0], color=c, linewidth=2, label=f"Epoch {e}")
-        for c, e in zip(EPOCH_COLORS, epochs)
+        Line2D([0], [0], color=cmap(epoch_norm[ei]), linewidth=2, label=f"Epoch {e}")
+        for ei, e in enumerate(epochs)
     ]
-    fig.legend(handles=handles, loc="lower center", ncol=len(epochs),
-               bbox_to_anchor=(0.5, -0.08), frameon=True)
+    fig.legend(handles=handles, loc="lower center", ncol=min(len(epochs), 8), frameon=True)
 
-    fig.tight_layout()
     out = os.path.join(BASE_OUTPUT_DIR, "pdp_1d_evolution.png")
     fig.savefig(out, dpi=150)
     plt.close(fig)
@@ -210,193 +251,115 @@ def plot_1d_pdp_evolution(models, X_bg, feature_names):
 
 
 # ─────────────────────────────────────────────────────────────
-# PLOT 2 — 2D PDP: Modifier Interaction (x0, x1)
+# PLOT 2 — 2D PDP Grid (one figure: rows = GT pairs, cols = selected epochs)
 # ─────────────────────────────────────────────────────────────
-def plot_2d_pdp_modifier(models, X_bg):
+def plot_2d_pdp_grid(models, X_bg, pairs, feature_names):
     """
-    2D PDP heatmaps for modifier interaction (x0 * x1).
-    Modifier: magnitude changes but sign stays constant.
-    Expected: gradient intensifies toward top-right, no sign flip.
+    Single figure: one row per GT pair, columns = GRID_EPOCHS_2D.
+    Shared colour scale per row. Save as pdp_2d_grid.png.
     """
-    epochs = SNAPSHOT_EPOCHS_2D
-    fig, axes = plt.subplots(1, len(epochs), figsize=(13, 4))
+    epochs = [e for e in GRID_EPOCHS_2D if e in models]
+    if not epochs or not pairs:
+        return
+    nrows = len(pairs)
+    ncols = len(epochs)
+    fig, axes = plt.subplots(
+        nrows, ncols,
+        figsize=(max(3 * ncols, 9), 3.5 * nrows),
+        constrained_layout=True,
+    )
+    if nrows == 1 and ncols == 1:
+        axes = np.array([[axes]])
+    elif nrows == 1:
+        axes = axes.reshape(1, -1)
+    elif ncols == 1:
+        axes = axes.reshape(-1, 1)
+
     fig.suptitle(
-        "2D PDP — Modifier Interaction (x0 × x1)\n"
-        r"Signal: $y \supset x_0 \cdot x_1$   |   "
-        "Expect: smooth gradient, no sign reversal",
-        fontsize=11, fontweight="bold"
+        "2D Partial Dependence — Evolution by Epoch (GT Pairs)",
+        fontsize=13, fontweight="bold", y=1.02
     )
 
-    vmin, vmax = None, None
-    # First pass to find global colour scale
-    all_Z = []
-    for epoch in epochs:
-        _, _, Z = compute_2d_pdp(models[epoch], X_bg, i=0, j=1)
-        all_Z.append(Z)
-    vmin = min(z.min() for z in all_Z)
-    vmax = max(z.max() for z in all_Z)
+    for row, (i, j) in enumerate(pairs):
+        print(f"    2D grid row {row + 1}/{nrows} (x{i}, x{j})...", flush=True)
+        all_Z = []
+        all_xs, all_ys = None, None
+        for ei, epoch in enumerate(epochs):
+            xs, ys, Z = compute_2d_pdp(models[epoch], X_bg, i, j)
+            all_Z.append(Z)
+            if all_xs is None:
+                all_xs, all_ys = xs, ys
+            if (ei + 1) % 2 == 0 or ei == 0:
+                print(f"      epoch {epoch} done", flush=True)
+        vmin = min(z.min() for z in all_Z)
+        vmax = max(z.max() for z in all_Z)
+        for col, (epoch, Z) in enumerate(zip(epochs, all_Z)):
+            ax = axes[row, col]
+            Xg, Yg = np.meshgrid(all_xs, all_ys)
+            cf = ax.contourf(Xg, Yg, Z, levels=20, cmap="viridis", vmin=vmin, vmax=vmax)
+            ax.contour(Xg, Yg, Z, levels=6, colors="white", linewidths=0.4, alpha=0.6)
+            ax.set_title(f"Epoch {epoch}", fontsize=10, fontweight="bold")
+            ax.set_xlabel(feature_names[i], fontsize=10)
+            if col == 0:
+                ax.set_ylabel(feature_names[j], fontsize=10)
+            ax.xaxis.set_major_locator(ticker.MaxNLocator(5))
+            ax.yaxis.set_major_locator(ticker.MaxNLocator(5))
+            fig.colorbar(cf, ax=ax, shrink=0.7, label="Avg output" if col == ncols - 1 else "")
 
-    for ax, epoch, Z in zip(axes, epochs, all_Z):
-        xs = np.linspace(0, 1, GRID_POINTS_2D)
-        ys = np.linspace(0, 1, GRID_POINTS_2D)
-        Xg, Yg = np.meshgrid(xs, ys)
-        cf = ax.contourf(Xg, Yg, Z, levels=20, cmap="YlOrRd",
-                          vmin=vmin, vmax=vmax)
-        ax.contour(Xg, Yg, Z, levels=6, colors="white",
-                   linewidths=0.5, alpha=0.6)
-        ax.set_title(f"Epoch {epoch}", fontsize=11)
-        ax.set_xlabel("x0  (modifier feature)", fontsize=9)
-        if ax is axes[0]:
-            ax.set_ylabel("x1", fontsize=9)
-        ax.xaxis.set_major_locator(ticker.MultipleLocator(0.25))
-        ax.yaxis.set_major_locator(ticker.MultipleLocator(0.25))
-        fig.colorbar(cf, ax=ax, shrink=0.85, label="Avg output" if ax is axes[-1] else "")
-
-    fig.tight_layout()
-    out = os.path.join(BASE_OUTPUT_DIR, "pdp_2d_modifier.png")
+    out = os.path.join(BASE_OUTPUT_DIR, "pdp_2d_grid.png")
     fig.savefig(out, dpi=150)
     plt.close(fig)
     print(f"  Saved: {out}")
 
 
 # ─────────────────────────────────────────────────────────────
-# PLOT 3 — 2D PDP: Crossover Interaction (x2, x3)
+# PLOT 3 — Interaction signature: two pairs side by side (static)
 # ─────────────────────────────────────────────────────────────
-def plot_2d_pdp_crossover(models, X_bg):
+def plot_interaction_signature(model, X_bg, pair1, pair2, feature_names):
     """
-    2D PDP heatmaps for crossover interaction x2*(x3 - 0.5).
-    Crossover: effect of x2 is negative when x3 < 0.5 and positive when x3 > 0.5.
-    Expected: blue (negative) below x3=0.5, red (positive) above — classic sign reversal.
+    PDP of first feature conditioned on second for two GT pairs.
+    Saves as pdp_interaction_signature.png.
     """
-    epochs = SNAPSHOT_EPOCHS_2D
-    fig, axes = plt.subplots(1, len(epochs), figsize=(13, 4))
+    cond_pct = [0.25, 0.5, 0.75]
+    cond_values = [np.percentile(X_bg[:, pair1[1]], p * 100) for p in cond_pct]
+    cond_values2 = [np.percentile(X_bg[:, pair2[1]], p * 100) for p in cond_pct]
+
+    grid1, curves1 = compute_interaction_curves(
+        model, X_bg, var_idx=pair1[0], cond_idx=pair1[1], cond_values=cond_values
+    )
+    grid2, curves2 = compute_interaction_curves(
+        model, X_bg, var_idx=pair2[0], cond_idx=pair2[1], cond_values=cond_values2
+    )
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5), constrained_layout=True)
     fig.suptitle(
-        "2D PDP — Crossover Interaction (x2, x3)\n"
-        r"Signal: $y \supset x_2 \cdot (x_3 - 0.5)$   |   "
-        "Expect: sign reversal at x3 = 0.5",
-        fontsize=11, fontweight="bold"
+        f"Interaction Signature at Epoch {INTERACTION_EPOCH} — Two GT Pairs",
+        fontsize=13, fontweight="bold", y=1.02
     )
-
-    all_Z = []
-    for epoch in epochs:
-        _, _, Z = compute_2d_pdp(models[epoch], X_bg, i=2, j=3)
-        all_Z.append(Z)
-
-    # Diverging colour centred at 0
-    abs_max = max(abs(z).max() for z in all_Z)
-
-    for ax, epoch, Z in zip(axes, epochs, all_Z):
-        xs = np.linspace(0, 1, GRID_POINTS_2D)
-        ys = np.linspace(0, 1, GRID_POINTS_2D)
-        Xg, Yg = np.meshgrid(xs, ys)
-        norm = TwoSlopeNorm(vmin=-abs_max, vcenter=0, vmax=abs_max)
-        cf = ax.contourf(Xg, Yg, Z, levels=20, cmap="RdBu_r", norm=norm)
-        ax.contour(Xg, Yg, Z, levels=[0], colors="black",
-                   linewidths=1.5, linestyles="--")
-        ax.axhline(0.5, color="black", linewidth=0.8, linestyle=":",
-                   alpha=0.7, label="x3 = 0.5")
-        ax.set_title(f"Epoch {epoch}", fontsize=11)
-        ax.set_xlabel("x2", fontsize=9)
-        if ax is axes[0]:
-            ax.set_ylabel("x3  (crossover feature)", fontsize=9)
-        ax.xaxis.set_major_locator(ticker.MultipleLocator(0.25))
-        ax.yaxis.set_major_locator(ticker.MultipleLocator(0.25))
-        fig.colorbar(cf, ax=ax, shrink=0.85,
-                     label="Avg output" if ax is axes[-1] else "")
-
-    # Annotate sign regions on the last panel
-    axes[-1].text(0.5, 0.25, "Negative\neffect", ha="center", va="center",
-                  fontsize=8, color="#1a5276",
-                  transform=axes[-1].transAxes,
-                  bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.7))
-    axes[-1].text(0.5, 0.72, "Positive\neffect", ha="center", va="center",
-                  fontsize=8, color="#922b21",
-                  transform=axes[-1].transAxes,
-                  bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.7))
-
-    fig.tight_layout()
-    out = os.path.join(BASE_OUTPUT_DIR, "pdp_2d_crossover.png")
-    fig.savefig(out, dpi=150)
-    plt.close(fig)
-    print(f"  Saved: {out}")
-
-
-# ─────────────────────────────────────────────────────────────
-# PLOT 4 — Modifier vs Crossover Signature
-# ─────────────────────────────────────────────────────────────
-def plot_modifier_vs_crossover_signature(model, X_bg):
-    """
-    The key diagnostic plot.
-    Left : PDP(x0) conditioned on x1 → lines fan but DON'T cross  (Modifier)
-    Right: PDP(x2) conditioned on x3 → lines CROSS each other     (Crossover)
-    """
-    cond_values = [0.1, 0.5, 0.9]
-    grid_x0, modifier_curves = compute_interaction_curves(
-        model, X_bg, var_idx=0, cond_idx=1, cond_values=cond_values
-    )
-    grid_x2, crossover_curves = compute_interaction_curves(
-        model, X_bg, var_idx=2, cond_idx=3, cond_values=cond_values
-    )
-
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
-    fig.suptitle(
-        f"Interaction Signature at Epoch {INTERACTION_EPOCH} — Modifier vs. Crossover",
-        fontsize=12, fontweight="bold"
-    )
-
-    labels = [f"= {c:.1f}" for c in cond_values]
+    labels = [f"= {c:.2f}" for c in cond_values]
+    labels2 = [f"= {c:.2f}" for c in cond_values2]
     linestyles = ["-", "--", ":"]
 
-    # ── Left: Modifier ─────────────────────────────────────────
-    ax_mod = axes[0]
+    ax1 = axes[0]
     for c, col, ls, lab in zip(cond_values, COND_COLORS, linestyles, labels):
-        ax_mod.plot(grid_x0, modifier_curves[c], color=col, linewidth=2.2,
-                    linestyle=ls, label=f"x1 {lab}")
+        ax1.plot(grid1, curves1[c], color=col, linewidth=2.2, linestyle=ls,
+                 label=f"{feature_names[pair1[1]]} {lab}")
+    ax1.axhline(0, color="#aaaaaa", linewidth=0.8, linestyle="-")
+    ax1.set_title(f"Pair ({feature_names[pair1[0]]}, {feature_names[pair1[1]]})", fontsize=10, fontweight="bold")
+    ax1.set_xlabel(feature_names[pair1[0]], fontsize=10)
+    ax1.set_ylabel("Avg. Model Output (PDP)", fontsize=10)
+    ax1.legend(title=f"{feature_names[pair1[1]]} condition", title_fontsize=8)
 
-    ax_mod.axhline(0, color="#aaaaaa", linewidth=0.8, linestyle="-")
-    ax_mod.set_title("Modifier Interaction\n(x0 × x1)", fontweight="bold")
-    ax_mod.set_xlabel("x0 value", fontsize=10)
-    ax_mod.set_ylabel("Avg. Model Output (PDP)", fontsize=10)
-    ax_mod.legend(title="x1 condition", title_fontsize=8)
-    ax_mod.annotate(
-        "Lines fan out\nbut do NOT cross\n→ sign constant",
-        xy=(0.97, 0.05), xycoords="axes fraction",
-        ha="right", va="bottom", fontsize=8.5,
-        bbox=dict(boxstyle="round,pad=0.35", facecolor="#fff8dc",
-                  edgecolor="#c8a800", alpha=0.9)
-    )
+    ax2 = axes[1]
+    for c, col, ls, lab in zip(cond_values2, COND_COLORS, linestyles, labels2):
+        ax2.plot(grid2, curves2[c], color=col, linewidth=2.2, linestyle=ls,
+                 label=f"{feature_names[pair2[1]]} {lab}")
+    ax2.axhline(0, color="#aaaaaa", linewidth=0.8, linestyle="-")
+    ax2.set_title(f"Pair ({feature_names[pair2[0]]}, {feature_names[pair2[1]]})", fontsize=10, fontweight="bold")
+    ax2.set_xlabel(feature_names[pair2[0]], fontsize=10)
+    ax2.legend(title=f"{feature_names[pair2[1]]} condition", title_fontsize=8)
 
-    # ── Right: Crossover ───────────────────────────────────────
-    ax_cross = axes[1]
-    for c, col, ls, lab in zip(cond_values, COND_COLORS, linestyles, labels):
-        ax_cross.plot(grid_x2, crossover_curves[c], color=col, linewidth=2.2,
-                      linestyle=ls, label=f"x3 {lab}")
-
-    ax_cross.axhline(0, color="#aaaaaa", linewidth=0.8, linestyle="-")
-    ax_cross.set_title("Crossover Interaction\n(x2 × (x3 − 0.5))", fontweight="bold")
-    ax_cross.set_xlabel("x2 value", fontsize=10)
-    ax_cross.legend(title="x3 condition", title_fontsize=8)
-    ax_cross.annotate(
-        "Lines CROSS each other\n→ sign reverses at x3 = 0.5",
-        xy=(0.97, 0.05), xycoords="axes fraction",
-        ha="right", va="bottom", fontsize=8.5,
-        bbox=dict(boxstyle="round,pad=0.35", facecolor="#fde8e8",
-                  edgecolor="#c0392b", alpha=0.9)
-    )
-
-    # Mark the crossing zone on the crossover panel
-    # Find approximate crossing x-coordinate
-    diff_01 = crossover_curves[0.1] - crossover_curves[0.9]
-    sign_changes = np.where(np.diff(np.sign(diff_01)))[0]
-    if len(sign_changes):
-        cross_x = grid_x2[sign_changes[0]]
-        ax_cross.axvline(cross_x, color="#555555", linewidth=1.2,
-                         linestyle="--", alpha=0.6)
-        ax_cross.text(cross_x + 0.02, ax_cross.get_ylim()[0] * 0.9,
-                      f"x≈{cross_x:.2f}", fontsize=7.5, color="#555555")
-
-    fig.tight_layout()
-    out = os.path.join(BASE_OUTPUT_DIR, "pdp_modifier_vs_crossover.png")
+    out = os.path.join(BASE_OUTPUT_DIR, "pdp_interaction_signature.png")
     fig.savefig(out, dpi=150)
     plt.close(fig)
     print(f"  Saved: {out}")
@@ -407,34 +370,53 @@ def plot_modifier_vs_crossover_signature(model, X_bg):
 # ─────────────────────────────────────────────────────────────
 def main():
     print("=" * 60)
-    print("  PDP Analysis — Improved Publication-Quality Plots")
+    print("  PDP Analysis — Grid Layouts & GIF Animations")
     print("=" * 60)
 
     ensure_dirs()
 
+    print("\nLoading meta (feature_names, ground_truth)...")
+    feature_names, ground_truth = load_meta()
+    pairs = ground_truth["pairwise"]
+    true_idx = ground_truth["true_idx"]
+
     print("\nLoading background data...")
-    X_bg, feature_names = get_background_data(MC_MAX_SAMPLES)
+    X_bg, _ = get_background_data(MC_MAX_SAMPLES)
     print(f"  Background samples: {X_bg.shape}")
 
-    epochs_needed = sorted(
-        set(SNAPSHOT_EPOCHS_1D) | set(SNAPSHOT_EPOCHS_2D) | {INTERACTION_EPOCH}
-    )
-    print(f"\nLoading model snapshots for epochs: {epochs_needed}")
-    models = load_unreg_models(epochs_needed)
+    # Load all snapshot epochs (for grid + GIFs)
+    epochs_all = sorted(e for e in SNAPSHOT_EPOCHS if e <= 300)
+    print(f"\nLoading model snapshots for {len(epochs_all)} epochs...")
+    models = load_unreg_models(epochs_all)
 
-    print("\n[1/4] 1D PDP evolution...")
-    plot_1d_pdp_evolution(
-        {e: models[e] for e in SNAPSHOT_EPOCHS_1D}, X_bg, feature_names
-    )
+    # 1D PDP evolution (subset of epochs for clear legend)
+    epochs_1d = [e for e in SNAPSHOT_EPOCHS_1D if e in models]
+    if epochs_1d:
+        print("\n[1/3] 1D PDP evolution (signal features)...")
+        plot_1d_pdp_evolution(
+            {e: models[e] for e in epochs_1d}, X_bg, feature_names, true_idx
+        )
 
-    print("[2/4] 2D PDP — Modifier interaction...")
-    plot_2d_pdp_modifier(models, X_bg)
+    # 2D PDP grid: по одной паре из каждого any_order GT set (макс. 4 строки)
+    representative_pairs = []
+    seen = set()
+    for ao in ground_truth["any_order"]:
+        ao_sorted = sorted(ao)
+        if len(ao_sorted) >= 2:
+            p = (ao_sorted[0], ao_sorted[1])
+            if p not in seen:
+                representative_pairs.append(p)
+                seen.add(p)
+    if representative_pairs:
+        print(f"[2/3] 2D PDP grid ({len(representative_pairs)} rows × {len(GRID_EPOCHS_2D)} cols)...")
+        plot_2d_pdp_grid(models, X_bg, representative_pairs, feature_names)
 
-    print("[3/4] 2D PDP — Crossover interaction...")
-    plot_2d_pdp_crossover(models, X_bg)
-
-    print(f"[4/4] Interaction signature at epoch {INTERACTION_EPOCH}...")
-    plot_modifier_vs_crossover_signature(models[INTERACTION_EPOCH], X_bg)
+    # Static interaction signature at final epoch
+    if len(pairs) >= 2 and INTERACTION_EPOCH in models:
+        print(f"[3/3] Interaction signature (static) at epoch {INTERACTION_EPOCH}...")
+        plot_interaction_signature(
+            models[INTERACTION_EPOCH], X_bg, pairs[0], pairs[1], feature_names
+        )
 
     print(f"\nDone! All figures saved to: {BASE_OUTPUT_DIR}")
 
