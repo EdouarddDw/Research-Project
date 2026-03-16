@@ -1,6 +1,8 @@
 import os
 import re
+from dataclasses import dataclass
 from itertools import combinations
+from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -16,94 +18,199 @@ from neural_interaction_detection import get_interactions
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 BASE_OUT = os.path.join(PROJECT_ROOT, "outputs", "all_functions")
+SNAPSHOT_FALLBACK_DIRS = [
+    os.path.join(PROJECT_ROOT, "outputs", "snapshots", "animation"),
+    os.path.join(PROJECT_ROOT, "outputs", "snapshots", "unregularized"),
+    os.path.join(PROJECT_ROOT, "outputs", "snapshots"),
+]
 NOISE_LEVELS = [0.1, 0.5]
 NUM_FEATURES = 10
 HIDDEN_UNITS = [140, 100, 60, 20]
 USE_MAIN_EFFECT_NETS = True
 
 
-def _snapshot_files(search_root: str) -> dict[int, str]:
-    """Find model_epoch_*.pt recursively under search_root."""
-    if not os.path.isdir(search_root):
-        return {}
-    pat = re.compile(r"model_epoch_(\d+)\.pt$")
-    found = {}
-    for root, _, files in os.walk(search_root):
-        for fn in files:
-            m = pat.match(fn)
-            if m:
-                ep = int(m.group(1))
-                p = os.path.join(root, fn)
-                # keep first if duplicate epoch
-                found.setdefault(ep, p)
-    return dict(sorted(found.items(), key=lambda x: x[0]))
+@dataclass
+class NIDPlotConfig:
+    project_root: str = PROJECT_ROOT
+    base_out: str = BASE_OUT
+    noise_levels: tuple[float, ...] = tuple(NOISE_LEVELS)
+    num_features: int = NUM_FEATURES
+    hidden_units: tuple[int, ...] = tuple(HIDDEN_UNITS)
+    use_main_effect_nets: bool = USE_MAIN_EFFECT_NETS
+    fallback_snapshot_dirs: tuple[str, ...] = tuple(SNAPSHOT_FALLBACK_DIRS)
+    fallback_function: int = 0
+    fallback_noise: float = 0.1
+    device: str = "cpu"
 
 
-def _gt_pair_set(fn_idx: int) -> set[tuple[int, int]]:
-    # synth returns 1-indexed variable ids in interaction sets
-    _, _, interactions = synth.functions[fn_idx](num_samples=16, seed=42, noise_std=0.0)
-    gt_pairs = set()
-    for inter in interactions:
-        inter = sorted(int(i) for i in inter)
-        if len(inter) < 2:
-            continue
-        for a, b in combinations(inter, 2):
-            gt_pairs.add((a, b))
-    return gt_pairs
+@dataclass
+class SnapshotInteractionMetrics:
+    noise: float
+    function: int
+    epoch: int
+    total_strength: float
+    non_gt_strength: float
+    frac_non_gt_strength: float
 
 
-def build_non_gt_dataframe() -> pd.DataFrame:
-    rows = []
-    device = torch.device("cpu")
+class NIDInteractionAnalyzer:
+    def __init__(self, config: NIDPlotConfig | None = None):
+        self.config = config or NIDPlotConfig()
+        self.device = torch.device(self.config.device)
 
-    for noise in NOISE_LEVELS:
-        for fn_idx in range(len(synth.functions)):
-            noise_root = os.path.join(BASE_OUT, f"F{fn_idx}", f"noise_{noise}")
-            snapshots = _snapshot_files(noise_root)
+    def snapshot_files(self, search_root: str) -> dict[int, str]:
+        """Find model_epoch_*.pt recursively under search_root."""
+        if not os.path.isdir(search_root):
+            return {}
+        pat = re.compile(r"model_epoch_(\d+)\.pt$")
+        found = {}
+        for root, _, files in os.walk(search_root):
+            for fn in files:
+                m = pat.match(fn)
+                if m:
+                    ep = int(m.group(1))
+                    p = os.path.join(root, fn)
+                    found.setdefault(ep, p)
+        return dict(sorted(found.items(), key=lambda x: x[0]))
+
+    def gt_pair_set(self, fn_idx: int) -> set[tuple[int, int]]:
+        """Return 1 indexed pairwise ground truth interactions for one synthetic function."""
+        _, _, interactions = synth.functions[fn_idx](num_samples=16, seed=42, noise_std=0.0)
+        gt_pairs = set()
+        for inter in interactions:
+            inter = sorted(int(i) for i in inter)
+            if len(inter) < 2:
+                continue
+            for a, b in combinations(inter, 2):
+                gt_pairs.add((a, b))
+        return gt_pairs
+
+    def make_model(self) -> MLP:
+        model = MLP(
+            self.config.num_features,
+            list(self.config.hidden_units),
+            use_main_effect_nets=self.config.use_main_effect_nets,
+        ).to(self.device)
+        model.eval()
+        return model
+
+    def load_state_dict_compat(self, checkpoint_path: str):
+        state = torch.load(checkpoint_path, map_location=self.device)
+        if isinstance(state, dict) and "model_state_dict" in state:
+            return state["model_state_dict"]
+        return state
+
+    def compute_pairwise_interactions(self, model: MLP):
+        return get_interactions(get_weights(model), pairwise=True, one_indexed=True)
+
+    def compute_snapshot_metric(self, model: MLP, fn_idx: int, noise: float, epoch: int) -> SnapshotInteractionMetrics:
+        gt_pairs = self.gt_pair_set(fn_idx)
+        pairwise = self.compute_pairwise_interactions(model)
+
+        total_strength = 0.0
+        non_gt_strength = 0.0
+        for (i, j), s in pairwise:
+            s = float(max(0.0, s))
+            total_strength += s
+            pair = tuple(sorted((int(i), int(j))))
+            if pair not in gt_pairs:
+                non_gt_strength += s
+
+        frac_non_gt = non_gt_strength / (total_strength + 1e-12)
+        return SnapshotInteractionMetrics(
+            noise=noise,
+            function=fn_idx,
+            epoch=epoch,
+            total_strength=total_strength,
+            non_gt_strength=non_gt_strength,
+            frac_non_gt_strength=frac_non_gt,
+        )
+
+    def build_non_gt_dataframe(self) -> pd.DataFrame:
+        rows = []
+        found_standard_snapshots = False
+
+        for noise in self.config.noise_levels:
+            for fn_idx in range(len(synth.functions)):
+                noise_root = os.path.join(self.config.base_out, f"F{fn_idx}", f"noise_{noise}")
+                snapshots = self.snapshot_files(noise_root)
+                if not snapshots:
+                    continue
+                found_standard_snapshots = True
+
+                model = self.make_model()
+
+                for ep, pth in snapshots.items():
+                    state_dict = self.load_state_dict_compat(pth)
+                    model.load_state_dict(state_dict)
+                    model.eval()
+                    metric = self.compute_snapshot_metric(model, fn_idx, noise, ep)
+                    rows.append({
+                        "noise": metric.noise,
+                        "function": metric.function,
+                        "epoch": metric.epoch,
+                        "total_strength": metric.total_strength,
+                        "non_gt_strength": metric.non_gt_strength,
+                        "frac_non_gt_strength": metric.frac_non_gt_strength,
+                    })
+
+        if rows or found_standard_snapshots:
+            return pd.DataFrame(rows)
+
+        # Fallback: if per-function/per-noise folders have no snapshots,
+        # try generic snapshot directories and compute a single curve using
+        # configured defaults for (function, noise).
+        for fallback_dir in self.config.fallback_snapshot_dirs:
+            snapshots = self.snapshot_files(fallback_dir)
             if not snapshots:
                 continue
 
-            gt_pairs = _gt_pair_set(fn_idx)
+            print(
+                "No snapshots found in outputs/all_functions/*/noise_*. "
+                f"Using fallback snapshots from: {fallback_dir} "
+                f"with function=F{self.config.fallback_function}, "
+                f"noise={self.config.fallback_noise}."
+            )
 
-            model = MLP(
-                NUM_FEATURES,
-                HIDDEN_UNITS,
-                use_main_effect_nets=USE_MAIN_EFFECT_NETS
-            ).to(device)
-            model.eval()
-
+            model = self.make_model()
             for ep, pth in snapshots.items():
-                state = torch.load(pth, map_location=device)
-                model.load_state_dict(state)
+                state_dict = self.load_state_dict_compat(pth)
+                model.load_state_dict(state_dict)
                 model.eval()
-
-                pairwise = get_interactions(get_weights(model), pairwise=True, one_indexed=True)
-
-                total_strength = 0.0
-                non_gt_strength = 0.0
-                for (i, j), s in pairwise:
-                    s = float(max(0.0, s))
-                    total_strength += s
-                    pair = tuple(sorted((int(i), int(j))))
-                    if pair not in gt_pairs:
-                        non_gt_strength += s
-
-                frac_non_gt = non_gt_strength / (total_strength + 1e-12)
+                metric = self.compute_snapshot_metric(
+                    model,
+                    self.config.fallback_function,
+                    self.config.fallback_noise,
+                    ep,
+                )
                 rows.append({
-                    "noise": noise,
-                    "function": fn_idx,
-                    "epoch": ep,
-                    "frac_non_gt_strength": frac_non_gt,
+                    "noise": metric.noise,
+                    "function": metric.function,
+                    "epoch": metric.epoch,
+                    "total_strength": metric.total_strength,
+                    "non_gt_strength": metric.non_gt_strength,
+                    "frac_non_gt_strength": metric.frac_non_gt_strength,
                 })
+            break
 
-    return pd.DataFrame(rows)
+        return pd.DataFrame(rows)
 
 
-def plot_non_gt_emergence(df: pd.DataFrame, save_path: str = None):
+def plot_non_gt_emergence(
+    df: pd.DataFrame,
+    save_path: str | None = None,
+    title: str = "Emergence of non-ground-truth interactions during training",
+    ax: plt.Axes | None = None,
+):
     if save_path is None:
         save_path = os.path.join(BASE_OUT, "non_gt_emergence_noise_comparison.png")
 
-    fig, ax = plt.subplots(figsize=(10, 5))
+    created_fig = False
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        created_fig = True
+    else:
+        fig = ax.figure
 
     for noise, color in [(0.1, "steelblue"), (0.5, "darkorange")]:
         d = df[df["noise"] == noise]
@@ -120,25 +227,81 @@ def plot_non_gt_emergence(df: pd.DataFrame, save_path: str = None):
 
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Fraction of pairwise interaction strength on non-GT pairs")
-    ax.set_title("Emergence of non-ground-truth interactions during training")
+    ax.set_title(title)
     ax.set_ylim(0, 1)
     ax.grid(alpha=0.3)
     ax.legend()
-    plt.tight_layout()
-    fig.savefig(save_path, dpi=150)
-    plt.close(fig)
-    print(f"Saved: {save_path}")
+
+    if created_fig:
+        plt.tight_layout()
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+        print(f"Saved: {save_path}")
+
+    return fig, ax
+
+
+def build_non_gt_dataframe(config: NIDPlotConfig | None = None) -> pd.DataFrame:
+    analyzer = NIDInteractionAnalyzer(config=config)
+    return analyzer.build_non_gt_dataframe()
+
+
+
+def compute_non_gt_fraction_for_model(
+    model: MLP,
+    fn_idx: int,
+    noise: float,
+    analyzer: NIDInteractionAnalyzer | None = None,
+) -> dict:
+    analyzer = analyzer or NIDInteractionAnalyzer()
+    metric = analyzer.compute_snapshot_metric(model, fn_idx, noise, epoch=-1)
+    return {
+        "noise": metric.noise,
+        "function": metric.function,
+        "epoch": metric.epoch,
+        "total_strength": metric.total_strength,
+        "non_gt_strength": metric.non_gt_strength,
+        "frac_non_gt_strength": metric.frac_non_gt_strength,
+    }
+
+
+
+def add_non_gt_fraction_annotation(
+    ax: plt.Axes,
+    model: MLP,
+    fn_idx: int,
+    noise: float,
+    analyzer: NIDInteractionAnalyzer | None = None,
+    x: float = 0.02,
+    y: float = 0.98,
+):
+    metrics = compute_non_gt_fraction_for_model(model, fn_idx, noise, analyzer=analyzer)
+    ax.text(
+        x,
+        y,
+        f"non-GT fraction: {metrics['frac_non_gt_strength']:.3f}",
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=10,
+        bbox=dict(boxstyle="round", facecolor="white", alpha=0.85),
+    )
+    return metrics
 
 
 def main():
-    df = build_non_gt_dataframe()
+    config = NIDPlotConfig()
+    df = build_non_gt_dataframe(config=config)
     if df.empty:
-        print("No snapshot data found under outputs/all_functions/*/noise_*/snapshots")
+        print("No snapshot data found under outputs/all_functions/*/noise_*")
         return
-    csv_path = os.path.join(BASE_OUT, "non_gt_emergence_metrics.csv")
+    csv_path = os.path.join(config.base_out, "non_gt_emergence_metrics.csv")
     df.to_csv(csv_path, index=False)
     print(f"Saved: {csv_path}")
-    plot_non_gt_emergence(df)
+    plot_non_gt_emergence(
+        df,
+        save_path=os.path.join(config.base_out, "non_gt_emergence_noise_comparison.png"),
+    )
 
 
 if __name__ == "__main__":

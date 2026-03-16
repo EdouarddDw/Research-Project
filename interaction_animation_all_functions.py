@@ -4,13 +4,86 @@ import torch
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
+def detect_overfitting_epoch(epochs, train_losses, val_losses, patience=3, min_delta=0.0, smooth_window=3):
+    """
+    Detect the onset of overfitting more robustly than using the maximum
+    validation-train gap.
+
+    Logic:
+    1. Smooth train/validation losses with a moving average.
+    2. Track the best validation loss seen so far.
+    3. Mark overfitting onset as the first epoch after the validation minimum
+       where validation loss fails to improve for `patience` consecutive points
+       while the train loss is still improving or staying flat.
+
+    Returns
+    -------
+    overfit_epoch : int
+        Estimated epoch where overfitting starts.
+    best_epoch : int
+        Epoch of best smoothed validation loss.
+    smooth_train : np.ndarray
+        Smoothed train loss.
+    smooth_val : np.ndarray
+        Smoothed validation loss.
+    """
+    epochs = np.asarray(epochs)
+    train_losses = np.asarray(train_losses, dtype=float)
+    val_losses = np.asarray(val_losses, dtype=float)
+
+    if len(epochs) == 0:
+        raise ValueError("epochs must not be empty")
+
+    if not (len(epochs) == len(train_losses) == len(val_losses)):
+        raise ValueError("epochs, train_losses, and val_losses must have the same length")
+
+    def moving_average(x, window):
+        if window <= 1 or len(x) < window:
+            return x.copy()
+        kernel = np.ones(window) / window
+        smoothed = np.convolve(x, kernel, mode="valid")
+        pad_left = window // 2
+        pad_right = len(x) - len(smoothed) - pad_left
+        return np.pad(smoothed, (pad_left, pad_right), mode="edge")
+
+    smooth_train = moving_average(train_losses, smooth_window)
+    smooth_val = moving_average(val_losses, smooth_window)
+
+    best_idx = int(np.argmin(smooth_val))
+    best_val = smooth_val[best_idx]
+    best_epoch = int(epochs[best_idx])
+
+    stale = 0
+    onset_idx = best_idx
+
+    for i in range(best_idx + 1, len(epochs)):
+        val_improved = smooth_val[i] < (best_val - min_delta)
+        train_not_worse = smooth_train[i] <= (smooth_train[i - 1] + min_delta)
+
+        if val_improved:
+            best_val = smooth_val[i]
+            best_idx = i
+            stale = 0
+            continue
+
+        if train_not_worse:
+            stale += 1
+        else:
+            stale = 0
+
+        if stale >= patience:
+            onset_idx = i - patience + 1
+            break
+    else:
+        onset_idx = best_idx
+
+    return int(epochs[onset_idx]), int(epochs[best_idx]), smooth_train, smooth_val
+
 import importlib
 import multilayer_perceptron
 import neural_interaction_detection
 import utils
-importlib.reload(multilayer_perceptron)
-importlib.reload(neural_interaction_detection)
-importlib.reload(utils)
+
 
 from multilayer_perceptron import MLP, train, get_weights
 from neural_interaction_detection import get_interactions, interactions_to_matrix
@@ -24,8 +97,7 @@ HIDDEN_UNITS   = [140, 100, 60, 20]
 USE_MAIN_EFFECT_NETS = True
 NEPOCHS        = 200
 LEARNING_RATE  = 1e-2
-L1_CONST       = 5e-5
-SNAPSHOT_EPOCHS = list(range(0, 201, 5))
+SNAPSHOT_EPOCHS = list(range(5, NEPOCHS + 1, 5))  # 1-indexed epochs only
 LABELS         = [f"x_{i}" for i in range(1, NUM_FEATURES + 1)]
 FUNCTIONS      = list(range(len(synth.functions)))
 NOISE_LEVELS   = [0.1, 0.5]
@@ -58,69 +130,59 @@ for noise_std in NOISE_LEVELS:
 
         # 1. Generate data
         X, Y, gt = synth.functions[fn_idx](num_samples=NUM_SAMPLES, seed=42, noise_std=noise_std)
-        data_loaders = preprocess_data(X, Y, valid_size=10000, test_size=10000,
-                                       std_scale=True, get_torch_loaders=True)
+        data_loaders = preprocess_data(
+            X, Y,
+            valid_size=10000,
+            test_size=10000,
+            std_scale=False,              # <- no normalisation
+            get_torch_loaders=True
+        )
         print(f"Data: X={X.shape}, Y={Y.shape}")
         print(f"GT interactions: {gt}")
         # 2. Train
         model = MLP(NUM_FEATURES, HIDDEN_UNITS,
                     use_main_effect_nets=USE_MAIN_EFFECT_NETS).to(device)
 
-        model, test_loss, snapshots = train(
-            model, data_loaders,
+        model, test_loss, snapshots, history = train(
+            model,
+            data_loaders,
             device=device,
             nepochs=NEPOCHS,
             learning_rate=LEARNING_RATE,
-            l1_const=L1_CONST,
-            l2_const=0.0,
             verbose=True,
-            early_stopping=False,
             save_snapshots=True,
             snapshot_epochs=SNAPSHOT_EPOCHS,
             snapshot_dir=snap_dir,
         )
         print(f"Test loss: {test_loss:.4f} | Snapshots: {sorted(snapshots.keys())}")
 
+        epochs_list = history["epoch"]
+        train_losses = history["train_loss"]
+        val_losses = history["val_loss"]
+
         # 3. Overfitting detection
         print("Computing train/val losses for overfitting detection...")
-        criterion = torch.nn.MSELoss(reduction="mean")
-        train_losses = []
-        val_losses   = []
-        epochs_list  = sorted(snapshots.keys())
-
-        for epoch, state_dict in sorted(snapshots.items()):
-            tmp = MLP(NUM_FEATURES, HIDDEN_UNITS,
-                      use_main_effect_nets=USE_MAIN_EFFECT_NETS).to(device)
-            tmp.load_state_dict(state_dict)
-            tmp.eval()
-
-            with torch.no_grad():
-                t_losses = [
-                    criterion(tmp(Xb.to(device)).squeeze(), Yb.to(device)).item()
-                    for Xb, Yb in data_loaders["train"]
-                ]
-                v_losses = [
-                    criterion(tmp(Xb.to(device)).squeeze(), Yb.to(device)).item()
-                    for Xb, Yb in data_loaders["val"]
-                ]
-
-            train_losses.append(np.mean(t_losses))
-            val_losses.append(np.mean(v_losses))
-
-        # Detect overfitting onset
-        gap = np.array(val_losses) - np.array(train_losses)
-        if gap.max() > 0:
-            onset_idx = int(np.argmax(gap > gap.max() * 0.1))
-        else:
-            onset_idx = len(epochs_list) - 1
-        overfit_epoch = epochs_list[onset_idx]
+        overfit_epoch, best_val_epoch, smooth_train_losses, smooth_val_losses = detect_overfitting_epoch(
+            epochs_list,
+            train_losses,
+            val_losses,
+            patience=3,
+            min_delta=1e-4,
+            smooth_window=3,
+        )
 
         # Plot overfitting
         fig_ov, ax = plt.subplots(figsize=(10, 5))
         ax.plot(epochs_list, train_losses, label="Train loss",
-                color="steelblue", linewidth=2, marker="o", markersize=4)
+                color="steelblue", linewidth=1.2, alpha=0.35, marker="o", markersize=3)
         ax.plot(epochs_list, val_losses, label="Validation loss",
-                color="darkorange", linewidth=2, linestyle="--", marker="s", markersize=4)
+                color="darkorange", linewidth=1.2, alpha=0.35, linestyle="--", marker="s", markersize=3)
+        ax.plot(epochs_list, smooth_train_losses, label="Train loss (smoothed)",
+                color="steelblue", linewidth=2.2)
+        ax.plot(epochs_list, smooth_val_losses, label="Validation loss (smoothed)",
+                color="darkorange", linewidth=2.2, linestyle="--")
+        ax.axvline(best_val_epoch, color="green", linestyle="-.", linewidth=2,
+                   label=f"Best val (~epoch {best_val_epoch})")
         ax.axvline(overfit_epoch, color="red", linestyle=":", linewidth=2,
                    label=f"Overfitting onset (~epoch {overfit_epoch})")
         ax.set_xlabel("Epoch", fontsize=12)
@@ -137,7 +199,8 @@ for noise_std in NOISE_LEVELS:
         print(f"Overfitting plot saved: {overfit_path}")
         print(f"  Min train: {min(train_losses):.4f} @ epoch {epochs_list[int(np.argmin(train_losses))]}")
         print(f"  Min val:   {min(val_losses):.4f} @ epoch {epochs_list[int(np.argmin(val_losses))]}")
-        print(f"  Onset:     epoch {overfit_epoch}")
+        print(f"  Best val (smoothed): epoch {best_val_epoch}")
+        print(f"  Onset:              epoch {overfit_epoch}")
 
         # 4. Compute interactions per snapshot
         pairwise_matrices = {}

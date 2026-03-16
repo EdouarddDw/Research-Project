@@ -107,6 +107,8 @@ def train(
     
     optimizer = torch.optim.SGD(net.parameters(), lr=learning_rate)
     
+    snapshots = {}
+    history = {"epoch": [], "train_loss": [], "val_loss": []}
     # Setup snapshot saving
     snapshots = {}  # epoch -> state_dict
     if save_snapshots:
@@ -117,11 +119,13 @@ def train(
 
     def evaluate(net, data_loader, criterion, device):
         losses = []
-        for inputs, labels in data_loader:
-            inputs = inputs.to(device)
-            labels = labels.to(device)
-            loss = criterion(net(inputs), labels).cpu().data
-            losses.append(loss)
+        net.eval()
+        with torch.no_grad():
+            for inputs, labels in data_loader:
+                inputs = inputs.to(device)
+                labels = labels.to(device)
+                preds = net(inputs)
+                losses.append(criterion(preds, labels))
         return torch.stack(losses).mean()
 
 
@@ -131,43 +135,33 @@ def train(
             print(f"saving snapshots at epochs: {snapshot_epochs}")
 
     for epoch in range(nepochs):
-        running_loss = 0.0
-        run_count = 0
-        for i, data in enumerate(data_loaders["train"], 0):
-            inputs, labels = data
+        net.train()
+        for inputs, labels in data_loaders["train"]:
             inputs = inputs.to(device)
             labels = labels.to(device)
             optimizer.zero_grad()
-            outputs = net(inputs)
-            loss = criterion(outputs, labels).mean()
-
+            preds = net(inputs)
+            loss = criterion(preds, labels)
             loss.backward()
             optimizer.step()
-            running_loss += loss.item()
-            run_count += 1
 
-        # Save snapshot if enabled and this epoch is in the list (1-indexed)
         current_epoch = epoch + 1
+
+        # record every epoch (not only snapshot epochs)
+        tr = evaluate(net, data_loaders["train"], criterion, device).item()
+        if "val" in data_loaders:
+            va = evaluate(net, data_loaders["val"], criterion, device).item()
+        else:
+            va = float("nan")
+
+        history["epoch"].append(current_epoch)
+        history["train_loss"].append(tr)
+        history["val_loss"].append(va)
+
         if save_snapshots and current_epoch in snapshot_epochs:
-            snapshot_path = os.path.join(snapshot_dir, f"model_epoch_{current_epoch}.pt")
-            torch.save(net.state_dict(), snapshot_path)
-            snapshots[current_epoch] = copy.deepcopy(net.state_dict())
-            if verbose:
-                print(f"  → Snapshot saved: {snapshot_path}")
-
-        if epoch % 1 == 0:
-            key = "val" if "val" in data_loaders else "train"
-            val_loss = evaluate(net, data_loaders[key], criterion, device)
-
-            if epoch % 2 == 0:
-                if verbose:
-                    print(
-                        "[epoch %d, total %d] train loss: %.4f, val loss: %.4f"
-                        % (epoch + 1, nepochs, running_loss / run_count, val_loss)
-                    )
-
-            prev_loss = running_loss
-            running_loss = 0.0
+            state = {k: v.detach().cpu().clone() for k, v in net.state_dict().items()}
+            snapshots[current_epoch] = state
+            torch.save(state, os.path.join(snapshot_dir, f"model_epoch_{current_epoch}.pt"))
 
     if "test" in data_loaders:
         key = "test"
@@ -182,5 +176,5 @@ def train(
 
     # Return snapshots dict if snapshot saving was enabled
     if save_snapshots:
-        return net, test_loss, snapshots
-    return net, test_loss
+        return net, test_loss, snapshots, history
+    return net, test_loss, history
