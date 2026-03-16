@@ -744,7 +744,11 @@ def plot_interaction_evolution(
 
     epochs = [s.epoch for s in shap_snaps]
 
-    fig, ax = plt.subplots(figsize=(12, 5))
+    # Larger canvas and gentler grid for readability
+    fig, ax = plt.subplots(figsize=(14, 6))
+
+    # Collect per-category curves so we can plot faded individual traces
+    per_cat: dict[str, list[np.ndarray]] = {"signal": [], "mixed": [], "noise": []}
 
     for f1, f2, cat in CONTRAST_PAIRS:
         i1 = FEATURE_COLS.index(f1)
@@ -755,15 +759,32 @@ def plot_interaction_evolution(
             c = np.corrcoef(s.shap_values[:, i1], X_ex_raw[:, i2])[0, 1]
             proxies.append(abs(c) if np.isfinite(c) else 0.0)
 
+        # Smooth short-term jitter for a clearer trendline
+        proxies = pd.Series(proxies).rolling(window=3, min_periods=1, center=True).mean().to_numpy()
+
         style = _PAIR_STYLE[cat]
-        ax.plot(epochs, proxies, label=f"{f1}×{f2} [{cat}]", **style)
+        # Plot each pair faintly (no legend entry) so the crowd is visible but not overwhelming
+        ax.plot(epochs, proxies, color=style["color"], linewidth=1.0, alpha=0.25, linestyle=style.get("linestyle", "-"))
+
+        per_cat[cat].append(proxies)
+
+    # Plot bold mean curve per category to summarise behaviour
+    for cat, curves in per_cat.items():
+        if not curves:
+            continue
+        mean_curve = np.mean(np.vstack(curves), axis=0)
+        style = _PAIR_STYLE[cat]
+        ax.plot(epochs, mean_curve, label=f"{cat} (mean)", color=style["color"], linewidth=3.0,
+                linestyle=style.get("linestyle", "-"))
 
     ax.set_xlabel("Epoch", fontsize=11)
     ax.set_ylabel("|corr(SHAP_i, X_j)|  (interaction proxy)", fontsize=11)
-    ax.set_ylim(0, 1)
-    ax.legend(loc="upper left", fontsize=9, framealpha=0.9)
+    ax.set_ylim(0, 0.4)
+    # Move legend outside to avoid overlapping the lines and make labels readable
+    ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=10, framealpha=0.9)
     ax.set_title(f"{model_label} – Interaction proxy evolution  "
                  "(signal vs cross vs noise pairs)", fontsize=13)
+    ax.grid(axis="y", linestyle="--", alpha=0.4)
     plt.tight_layout()
     plt.savefig(OUTPUT_DIR / "06_interaction_evolution.png", dpi=DPI, bbox_inches="tight")
     plt.close(fig)
