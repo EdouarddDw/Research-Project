@@ -24,7 +24,7 @@ from ice_hstat_analysis import (
     load_meta,
     get_background_data,
     ensure_dirs,
-    BASE_OUTPUT_DIR,
+    ICE_GIFS_DIR,
     UNREG_SNAPSHOT_DIR,
     GRID_POINTS_1D,
     GRID_POINTS_2D,
@@ -81,6 +81,62 @@ def create_ice_gif(
         ax.plot(grid, pdp, color="black", linestyle="--", linewidth=2.2, label="PDP")
         ax.set_xlabel(feature_name, fontsize=10)
         ax.set_ylabel("Model output", fontsize=10)
+        ax.set_title(f"Epoch {epoch}", fontsize=13, fontweight="bold")
+        ax.set_xlim(v_min, v_max)
+        ax.grid(True, color="#e0e0e0", linestyle="--")
+        return []
+
+    ani = FuncAnimation(
+        fig, update, frames=len(epochs), interval=GIF_INTERVAL_MS, blit=False
+    )
+    ani.save(out_path, writer=PillowWriter(fps=fps), dpi=GIF_DPI)
+    plt.close(fig)
+    print(f"  Saved: {out_path}")
+
+
+def create_ice_centered_gif(
+    models,
+    X_bg,
+    feature_idx,
+    feature_name,
+    all_epochs,
+    out_path,
+    fps=4,
+    n_curve_sample=50,
+):
+    """One frame per epoch: centered ICE (individual curves + mean + std band). Single panel."""
+    epochs = sorted(e for e in all_epochs if e in models)
+    if not epochs:
+        return
+    v_min, v_max = X_bg[:, feature_idx].min(), X_bg[:, feature_idx].max()
+    grid = np.linspace(v_min, v_max, GRID_POINTS_1D)
+    rng = np.random.RandomState(42)
+    n_bg = len(X_bg)
+    curve_idx = rng.choice(n_bg, size=min(n_curve_sample, n_bg), replace=False)
+
+    fig, ax = plt.subplots(figsize=(8, 4), constrained_layout=True)
+
+    def update(frame_idx):
+        ax.clear()
+        epoch = epochs[frame_idx]
+        model = models[epoch]
+        ice = compute_ice(model, X_bg, feature_idx, grid)
+        ice_centered = ice - ice[:, [0]]
+        mean_centered = ice_centered.mean(axis=0)
+        std_centered = ice_centered.std(axis=0)
+        for k in curve_idx:
+            ax.plot(grid, ice_centered[k], color="#2ca02c", alpha=0.3, linewidth=0.9)
+        ax.fill_between(
+            grid,
+            mean_centered - std_centered,
+            mean_centered + std_centered,
+            color="#2ca02c",
+            alpha=0.2,
+        )
+        ax.plot(grid, mean_centered, color="#006400", linewidth=2.3, label="Mean c-ICE")
+        ax.axhline(0.0, color="#555555", linewidth=0.8, linestyle="--")
+        ax.set_xlabel(feature_name, fontsize=10)
+        ax.set_ylabel("Centered model output", fontsize=10)
         ax.set_title(f"Epoch {epoch}", fontsize=13, fontweight="bold")
         ax.set_xlim(v_min, v_max)
         ax.grid(True, color="#e0e0e0", linestyle="--")
@@ -175,23 +231,31 @@ def main():
     print(f"\nLoading model snapshots for {len(epochs_all)} epochs...")
     models = load_unreg_models(epochs_all)
 
-    # create_ice_gif per signal feature
-    for fid in true_idx:
-        out_gif = os.path.join(BASE_OUTPUT_DIR, f"ice_evolution_x{fid}.gif")
-        print(f"[1/2] ICE GIF for {feature_names[fid]}...")
+    # create_ice_gif per feature — all 10
+    for fid in range(len(feature_names)):
+        out_gif = os.path.join(ICE_GIFS_DIR, f"ice_evolution_x{fid}.gif")
+        print(f"[1/3] ICE GIF {fid + 1}/{len(feature_names)} (x{fid})...")
         create_ice_gif(
+            models, X_bg, fid, feature_names[fid], epochs_all, out_gif, fps=GIF_FPS
+        )
+
+    # create_ice_centered_gif per feature — all 10
+    for fid in range(len(feature_names)):
+        out_gif = os.path.join(ICE_GIFS_DIR, f"ice_centered_x{fid}.gif")
+        print(f"[2/3] Centered ICE GIF {fid + 1}/{len(feature_names)} (x{fid})...")
+        create_ice_centered_gif(
             models, X_bg, fid, feature_names[fid], epochs_all, out_gif, fps=GIF_FPS
         )
 
     # create_hstat_heatmap_gif
     if true_idx:
-        out_hstat_gif = os.path.join(BASE_OUTPUT_DIR, "hstat_heatmap_evolution.gif")
-        print("[2/2] H-statistic heatmap GIF...")
+        out_hstat_gif = os.path.join(ICE_GIFS_DIR, "hstat_heatmap_evolution.gif")
+        print("[3/3] H-statistic heatmap GIF...")
         create_hstat_heatmap_gif(
             models, X_bg, feature_names, true_idx, epochs_all, out_hstat_gif, fps=GIF_FPS
         )
 
-    print(f"\nDone! All GIFs saved to: {BASE_OUTPUT_DIR}")
+    print(f"\nDone! All GIFs saved to: {ICE_GIFS_DIR}")
 
 
 if __name__ == "__main__":
