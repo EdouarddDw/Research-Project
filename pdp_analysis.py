@@ -8,10 +8,11 @@ Publication-quality matplotlib styling and static PNG figures.
 Run AFTER train_mlp_snapshots.py has generated model snapshots in:
     outputs/snapshots/unregularized/model_epoch_{N}.pt
 
-Generated figures (saved under ./outputs/snapshots/):
-    - pdp_1d_evolution.png       — 1D PDP grid (signal features × epochs)
-    - pdp_2d_grid.png            — 2D PDP grid (GT pairs × selected epochs)
-    - pdp_interaction_signature.png — conditional PDP curves (static)
+Generated figures (saved under ./outputs/pdp/static/):
+    - pdp_1d_x{i}.png            — 1D PDP per feature (3×3 grid, 9 epochs)
+    - pdp_2d_x{i}_x{j}.png       — 2D PDP per GT pair (3×3 grid, 9 epochs)
+    - pdp_signature_x{i}_x{j}.png — interaction signature per pair (3×3 grid, 9 epochs)
+    (plot_1d_pdp_evolution, plot_2d_pdp_grid, plot_interaction_signature still in code, not called from main)
 
 For GIF animations run separately: python pdp_gifs.py
 """
@@ -71,12 +72,13 @@ COND_COLORS = ["#e41a1c", "#377eb8", "#4daf4a"]  # for conditioned curves
 # ─────────────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────────────
-BASE_OUTPUT_DIR    = "./outputs/snapshots"
-UNREG_SNAPSHOT_DIR = os.path.join(BASE_OUTPUT_DIR, "unregularized")
+SNAPSHOT_DIR       = "./outputs/snapshots"       # unregularized/, l2/ live here
+UNREG_SNAPSHOT_DIR = os.path.join(SNAPSHOT_DIR, "unregularized")
+PDP_STATIC_DIR     = "./outputs/pdp/static"      # all PNG from pdp_analysis.py
+PDP_GIFS_DIR       = "./outputs/pdp/gifs"        # all GIF from pdp_gifs.py
 
-# Subset of epochs for static 1D PDP (clear legend) and 2D grid columns
-SNAPSHOT_EPOCHS_1D = [1, 10, 30, 75, 150, 300]
-GRID_EPOCHS_2D     = [1, 10, 30, 75, 150, 300]   # columns in pdp_2d_grid.png
+# 9 epochs → 3×3 grid for ALL static plots (1D PDP, 2D PDP, interaction signature)
+GRID_EPOCHS = [1, 3, 5, 10, 20, 30, 50, 150, 300]
 INTERACTION_EPOCH  = 300
 
 GRID_POINTS_1D = 60
@@ -86,12 +88,31 @@ GIF_DPI = 100
 GIF_FPS = 4
 GIF_INTERVAL_MS = 250
 
+# True noise features per synth function (0-indexed).
+# These are features that do NOT appear anywhere in the formula,
+# not just features absent from interaction sets.
+# ground_truth["noise_idx"] is interaction-based and includes main-effect-only
+# features, which is wrong for PDP overfitting analysis.
+TRUE_NOISE_IDX = {
+    0: [5],           # F1: x6 not in formula
+    1: [5],           # F2: x6 not in formula
+    2: [5],           # F3: x6 not in formula
+    3: [5],           # F4: x6 not in formula
+    4: [],            # F5: all features in formula
+    5: [6],           # F6: x7 not in formula
+    6: [],            # F7: all features in formula (np.sum(X))
+    7: [],            # F8: all features in formula
+    8: [],            # F9: all features in formula
+    9: [5, 7, 9],     # F10: x6, x8, x10 not in formula
+}
+
 
 # ─────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────
 def ensure_dirs():
-    os.makedirs(BASE_OUTPUT_DIR, exist_ok=True)
+    os.makedirs(PDP_STATIC_DIR, exist_ok=True)
+    os.makedirs(PDP_GIFS_DIR, exist_ok=True)
     if not os.path.isdir(UNREG_SNAPSHOT_DIR):
         raise FileNotFoundError(
             f"Snapshot directory not found: {UNREG_SNAPSHOT_DIR}\n"
@@ -244,10 +265,59 @@ def plot_1d_pdp_evolution(models, X_bg, feature_names, true_idx):
     ]
     fig.legend(handles=handles, loc="lower center", ncol=min(len(epochs), 8), frameon=True)
 
-    out = os.path.join(BASE_OUTPUT_DIR, "pdp_1d_evolution.png")
+    out = os.path.join(PDP_STATIC_DIR, "pdp_1d_evolution.png")
     fig.savefig(out, dpi=150)
     plt.close(fig)
     print(f"  Saved: {out}")
+
+
+# ─────────────────────────────────────────────────────────────
+# PLOT 1b — 1D PDP Individual (one PNG per feature × epochs)
+# ─────────────────────────────────────────────────────────────
+def plot_1d_pdp_individual(models, X_bg, feature_names):
+    """
+    For each feature (all), save one PNG: 3×3 grid, 9 epochs (GRID_EPOCHS).
+    Each subplot: 1D PDP curve at that epoch. Shared Y-axis across all 9.
+    File: pdp_1d_x{i}.png
+    """
+    epochs = [e for e in GRID_EPOCHS if e in models]
+    if not epochs:
+        return
+    n_feat = len(feature_names)
+    for feat_idx in range(n_feat):
+        print(f"    1D PDP individual {feat_idx + 1}/{n_feat} (x{feat_idx})...", flush=True)
+        v_min, v_max = X_bg[:, feat_idx].min(), X_bg[:, feat_idx].max()
+        grid = np.linspace(v_min, v_max, GRID_POINTS_1D)
+        all_vals = []
+        for epoch in epochs:
+            pdp_vals = compute_1d_pdp(models[epoch], X_bg, feat_idx, grid)
+            all_vals.append(pdp_vals)
+        all_vals = np.array(all_vals)
+        y_min, y_max = all_vals.min(), all_vals.max()
+        fig, axes = plt.subplots(
+            3, 3,
+            figsize=(12, 10),
+            sharey=True,
+            constrained_layout=True,
+        )
+        axes_flat = axes.flatten()
+        fig.suptitle(
+            f"1D PDP — x{feat_idx} ({feature_names[feat_idx]}) — Evolution by Epoch",
+            fontsize=13, fontweight="bold", y=1.02,
+        )
+        for idx, (epoch, pdp_vals) in enumerate(zip(epochs, all_vals)):
+            ax = axes_flat[idx]
+            ax.plot(grid, pdp_vals, color="#2ca02c", linewidth=1.8)
+            ax.set_ylim(y_min, y_max)
+            ax.set_title(f"Epoch {epoch}", fontsize=10, fontweight="bold")
+            ax.set_xlabel(feature_names[feat_idx], fontsize=10)
+            if idx % 3 == 0:
+                ax.set_ylabel("Avg. Model Output (PDP)", fontsize=10)
+            ax.xaxis.set_major_locator(ticker.MaxNLocator(5))
+        out = os.path.join(PDP_STATIC_DIR, f"pdp_1d_x{feat_idx}.png")
+        fig.savefig(out, dpi=150)
+        plt.close(fig)
+        print(f"  Saved: {out}")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -255,10 +325,10 @@ def plot_1d_pdp_evolution(models, X_bg, feature_names, true_idx):
 # ─────────────────────────────────────────────────────────────
 def plot_2d_pdp_grid(models, X_bg, pairs, feature_names):
     """
-    Single figure: one row per GT pair, columns = GRID_EPOCHS_2D.
+    Single figure: one row per GT pair, columns = GRID_EPOCHS.
     Shared colour scale per row. Save as pdp_2d_grid.png.
     """
-    epochs = [e for e in GRID_EPOCHS_2D if e in models]
+    epochs = [e for e in GRID_EPOCHS if e in models]
     if not epochs or not pairs:
         return
     nrows = len(pairs)
@@ -306,10 +376,61 @@ def plot_2d_pdp_grid(models, X_bg, pairs, feature_names):
             ax.yaxis.set_major_locator(ticker.MaxNLocator(5))
             fig.colorbar(cf, ax=ax, shrink=0.7, label="Avg output" if col == ncols - 1 else "")
 
-    out = os.path.join(BASE_OUTPUT_DIR, "pdp_2d_grid.png")
+    out = os.path.join(PDP_STATIC_DIR, "pdp_2d_grid.png")
     fig.savefig(out, dpi=150)
     plt.close(fig)
     print(f"  Saved: {out}")
+
+
+# ─────────────────────────────────────────────────────────────
+# PLOT 2b — 2D PDP Individual (one PNG per GT pair, dense epochs)
+# ─────────────────────────────────────────────────────────────
+def plot_2d_pdp_individual(models, X_bg, pairs, feature_names):
+    """
+    For EACH GT pair, save a separate PNG: 3×3 grid, 9 epochs (GRID_EPOCHS).
+    Shared colour scale (global vmin/vmax). File: pdp_2d_x{i}_x{j}.png
+    """
+    epochs = [e for e in GRID_EPOCHS if e in models]
+    if not epochs or not pairs:
+        return
+    for pair_idx, (i, j) in enumerate(pairs):
+        print(f"    2D PDP individual {pair_idx + 1}/{len(pairs)} (x{i}, x{j})...", flush=True)
+        all_Z = []
+        all_xs, all_ys = None, None
+        for epoch in epochs:
+            xs, ys, Z = compute_2d_pdp(models[epoch], X_bg, i, j)
+            all_Z.append(Z)
+            if all_xs is None:
+                all_xs, all_ys = xs, ys
+        vmin = min(z.min() for z in all_Z)
+        vmax = max(z.max() for z in all_Z)
+        fig, axes = plt.subplots(
+            3, 3,
+            figsize=(12, 10),
+            constrained_layout=True,
+        )
+        axes_flat = axes.flatten()
+        fig.suptitle(
+            f"2D PDP — (x{i}, x{j}) — Evolution by Epoch",
+            fontsize=13, fontweight="bold", y=1.02,
+        )
+        for idx, (epoch, Z) in enumerate(zip(epochs, all_Z)):
+            ax = axes_flat[idx]
+            Xg, Yg = np.meshgrid(all_xs, all_ys)
+            cf = ax.contourf(Xg, Yg, Z, levels=20, cmap="viridis", vmin=vmin, vmax=vmax)
+            ax.contour(Xg, Yg, Z, levels=6, colors="white", linewidths=0.4, alpha=0.6)
+            ax.set_title(f"Epoch {epoch}", fontsize=10, fontweight="bold")
+            ax.set_xlabel(feature_names[i], fontsize=10)
+            if idx % 3 == 0:
+                ax.set_ylabel(feature_names[j], fontsize=10)
+            ax.xaxis.set_major_locator(ticker.MaxNLocator(5))
+            ax.yaxis.set_major_locator(ticker.MaxNLocator(5))
+            if idx == 8:
+                fig.colorbar(cf, ax=ax, shrink=0.7, label="Avg output")
+        out = os.path.join(PDP_STATIC_DIR, f"pdp_2d_x{i}_x{j}.png")
+        fig.savefig(out, dpi=150)
+        plt.close(fig)
+        print(f"  Saved: {out}")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -359,7 +480,210 @@ def plot_interaction_signature(model, X_bg, pair1, pair2, feature_names):
     ax2.set_xlabel(feature_names[pair2[0]], fontsize=10)
     ax2.legend(title=f"{feature_names[pair2[1]]} condition", title_fontsize=8)
 
-    out = os.path.join(BASE_OUTPUT_DIR, "pdp_interaction_signature.png")
+    out = os.path.join(PDP_STATIC_DIR, "pdp_interaction_signature.png")
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"  Saved: {out}")
+
+
+# ─────────────────────────────────────────────────────────────
+# PLOT 3b — Interaction signature individual (one PNG per GT pair × epochs)
+# ─────────────────────────────────────────────────────────────
+def plot_interaction_signatures_individual(models, X_bg, pairs, feature_names):
+    """
+    For each GT pair (i, j), save one PNG: 3×3 grid, 9 epochs (GRID_EPOCHS).
+    Each subplot: 3 conditioned PDP curves (25th/50th/75th percentile).
+    File: pdp_signature_x{i}_x{j}.png
+    """
+    epochs = [e for e in GRID_EPOCHS if e in models]
+    if not epochs or not pairs:
+        return
+    cond_pct = [0.25, 0.5, 0.75]
+    linestyles = ["-", "--", ":"]
+    for pair_idx, (i, j) in enumerate(pairs):
+        print(f"    Interaction signature {pair_idx + 1}/{len(pairs)} (x{i}, x{j})...", flush=True)
+        cond_values = [np.percentile(X_bg[:, j], p * 100) for p in cond_pct]
+        fig, axes = plt.subplots(
+            3, 3,
+            figsize=(12, 10),
+            constrained_layout=True,
+        )
+        axes_flat = axes.flatten()
+        fig.suptitle(
+            f"Interaction Signature — (x{i}, x{j}) — Evolution by Epoch",
+            fontsize=13, fontweight="bold", y=1.02,
+        )
+        for idx, epoch in enumerate(epochs):
+            model = models[epoch]
+            grid, curves = compute_interaction_curves(
+                model, X_bg, var_idx=i, cond_idx=j, cond_values=cond_values
+            )
+            ax = axes_flat[idx]
+            for c, col_c, ls in zip(cond_values, COND_COLORS, linestyles):
+                ax.plot(grid, curves[c], color=col_c, linewidth=2.2, linestyle=ls)
+            ax.axhline(0, color="#aaaaaa", linewidth=0.8, linestyle="-")
+            ax.set_title(f"Epoch {epoch}", fontsize=10, fontweight="bold")
+            ax.set_xlabel(feature_names[i], fontsize=10)
+            if idx % 3 == 0:
+                ax.set_ylabel("Avg. Model Output (PDP)", fontsize=10)
+        out = os.path.join(PDP_STATIC_DIR, f"pdp_signature_x{i}_x{j}.png")
+        fig.savefig(out, dpi=150)
+        plt.close(fig)
+        print(f"  Saved: {out}")
+
+
+# ─────────────────────────────────────────────────────────────
+# OVERFITTING DETECTION (Area 1) — PDP Roughness & Range
+# ─────────────────────────────────────────────────────────────
+def compute_pdp_roughness(pdp_values):
+    """
+    Roughness = sum of squared second differences (discrete 2nd derivative).
+    Measures how "wiggly" a 1D PDP curve is; noise features get high roughness when overfitting.
+    """
+    pdp = np.asarray(pdp_values, dtype=np.float64)
+    n = len(pdp)
+    if n < 3:
+        return 0.0
+    second_diff = pdp[2:] - 2 * pdp[1:-1] + pdp[:-2]
+    return float(np.sum(second_diff ** 2))
+
+
+def plot_pdp_roughness_evolution(models, X_bg, feature_names, true_idx, noise_idx):
+    """
+    PDP roughness vs epoch for signal vs noise features.
+    Signal = blue solid; noise = red dashed. Bold lines for mean signal / mean noise.
+    Saves to pdp_roughness_evolution.png in PDP_STATIC_DIR.
+    """
+    epochs = sorted(models.keys())
+    if not epochs:
+        return
+    n_feat = len(feature_names)
+    # roughness[epoch_idx][feat_idx]
+    roughness = np.zeros((len(epochs), n_feat))
+    for ei, epoch in enumerate(epochs):
+        model = models[epoch]
+        for feat_idx in range(n_feat):
+            v_min, v_max = X_bg[:, feat_idx].min(), X_bg[:, feat_idx].max()
+            grid = np.linspace(v_min, v_max, GRID_POINTS_1D)
+            pdp_vals = compute_1d_pdp(model, X_bg, feat_idx, grid)
+            roughness[ei, feat_idx] = compute_pdp_roughness(pdp_vals)
+
+    fig, ax = plt.subplots(figsize=(12, 5), constrained_layout=True)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("PDP Roughness")
+    ax.set_title("PDP Roughness Evolution — Signal vs Noise Features (Overfitting Detection)")
+    ax.set_xlim(epochs[0], epochs[-1] * 1.15)
+
+    for feat_idx in true_idx:
+        vals = roughness[:, feat_idx]
+        ax.plot(epochs, vals, color="#377eb8", linestyle="-", linewidth=1.2, alpha=0.8)
+        ax.annotate(
+            feature_names[feat_idx],
+            xy=(epochs[-1], vals[-1]),
+            xytext=(5, 0),
+            textcoords="offset points",
+            fontsize=8,
+            color="#377eb8",
+            va="center",
+        )
+    for feat_idx in noise_idx:
+        vals = roughness[:, feat_idx]
+        ax.plot(epochs, vals, color="#e41a1c", linestyle="--", linewidth=1.2, alpha=0.8)
+        ax.annotate(
+            feature_names[feat_idx],
+            xy=(epochs[-1], vals[-1]),
+            xytext=(5, 0),
+            textcoords="offset points",
+            fontsize=8,
+            color="#e41a1c",
+            va="center",
+        )
+
+    if true_idx:
+        mean_signal = roughness[:, true_idx].mean(axis=1)
+        ax.plot(epochs, mean_signal, color="#377eb8", linestyle="-", linewidth=3)
+    if noise_idx:
+        mean_noise = roughness[:, noise_idx].mean(axis=1)
+        ax.plot(epochs, mean_noise, color="#e41a1c", linestyle="--", linewidth=3)
+
+    handles = [
+        Line2D([0], [0], color="#377eb8", linestyle="-", linewidth=1.2, label="Signal features"),
+        Line2D([0], [0], color="#e41a1c", linestyle="--", linewidth=1.2, label="Noise features"),
+        Line2D([0], [0], color="#377eb8", linestyle="-", linewidth=3, label="Mean (signal)"),
+        Line2D([0], [0], color="#e41a1c", linestyle="--", linewidth=3, label="Mean (noise)"),
+    ]
+    ax.legend(handles=handles, loc="best", fontsize=9)
+    out = os.path.join(PDP_STATIC_DIR, "pdp_roughness_evolution.png")
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    print(f"  Saved: {out}")
+
+
+def plot_pdp_range_evolution(models, X_bg, feature_names, true_idx, noise_idx):
+    """
+    PDP range (max - min) vs epoch — "Feature Importance Inflation" for overfitting.
+    Signal = blue solid; noise = red dashed. Bold lines for mean signal / mean noise.
+    Saves to pdp_range_evolution.png in PDP_STATIC_DIR.
+    """
+    epochs = sorted(models.keys())
+    if not epochs:
+        return
+    n_feat = len(feature_names)
+    pdp_range = np.zeros((len(epochs), n_feat))
+    for ei, epoch in enumerate(epochs):
+        model = models[epoch]
+        for feat_idx in range(n_feat):
+            v_min, v_max = X_bg[:, feat_idx].min(), X_bg[:, feat_idx].max()
+            grid = np.linspace(v_min, v_max, GRID_POINTS_1D)
+            pdp_vals = compute_1d_pdp(model, X_bg, feat_idx, grid)
+            pdp_range[ei, feat_idx] = float(np.max(pdp_vals) - np.min(pdp_vals))
+
+    fig, ax = plt.subplots(figsize=(12, 5), constrained_layout=True)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("PDP Range (max − min)")
+    ax.set_title("PDP Range Evolution — Signal vs Noise Features (Overfitting Detection)")
+    ax.set_xlim(epochs[0], epochs[-1] * 1.15)
+
+    for feat_idx in true_idx:
+        vals = pdp_range[:, feat_idx]
+        ax.plot(epochs, vals, color="#377eb8", linestyle="-", linewidth=1.2, alpha=0.8)
+        ax.annotate(
+            feature_names[feat_idx],
+            xy=(epochs[-1], vals[-1]),
+            xytext=(5, 0),
+            textcoords="offset points",
+            fontsize=8,
+            color="#377eb8",
+            va="center",
+        )
+    for feat_idx in noise_idx:
+        vals = pdp_range[:, feat_idx]
+        ax.plot(epochs, vals, color="#e41a1c", linestyle="--", linewidth=1.2, alpha=0.8)
+        ax.annotate(
+            feature_names[feat_idx],
+            xy=(epochs[-1], vals[-1]),
+            xytext=(5, 0),
+            textcoords="offset points",
+            fontsize=8,
+            color="#e41a1c",
+            va="center",
+        )
+
+    if true_idx:
+        mean_signal = pdp_range[:, true_idx].mean(axis=1)
+        ax.plot(epochs, mean_signal, color="#377eb8", linestyle="-", linewidth=3)
+    if noise_idx:
+        mean_noise = pdp_range[:, noise_idx].mean(axis=1)
+        ax.plot(epochs, mean_noise, color="#e41a1c", linestyle="--", linewidth=3)
+
+    handles = [
+        Line2D([0], [0], color="#377eb8", linestyle="-", linewidth=1.2, label="Signal features"),
+        Line2D([0], [0], color="#e41a1c", linestyle="--", linewidth=1.2, label="Noise features"),
+        Line2D([0], [0], color="#377eb8", linestyle="-", linewidth=3, label="Mean (signal)"),
+        Line2D([0], [0], color="#e41a1c", linestyle="--", linewidth=3, label="Mean (noise)"),
+    ]
+    ax.legend(handles=handles, loc="best", fontsize=9)
+    out = os.path.join(PDP_STATIC_DIR, "pdp_range_evolution.png")
     fig.savefig(out, dpi=150)
     plt.close(fig)
     print(f"  Saved: {out}")
@@ -379,6 +703,9 @@ def main():
     feature_names, ground_truth = load_meta()
     pairs = ground_truth["pairwise"]
     true_idx = ground_truth["true_idx"]
+    # Overfitting plots use formula-based noise; rest of script uses ground_truth as-is.
+    noise_idx = TRUE_NOISE_IDX.get(SYNTH_FN_IDX, ground_truth.get("noise_idx", []))
+    true_idx_for_overfit = [i for i in range(len(feature_names)) if i not in noise_idx]
 
     print("\nLoading background data...")
     X_bg, _ = get_background_data(MC_MAX_SAMPLES)
@@ -389,36 +716,29 @@ def main():
     print(f"\nLoading model snapshots for {len(epochs_all)} epochs...")
     models = load_unreg_models(epochs_all)
 
-    # 1D PDP evolution (subset of epochs for clear legend)
-    epochs_1d = [e for e in SNAPSHOT_EPOCHS_1D if e in models]
-    if epochs_1d:
-        print("\n[1/3] 1D PDP evolution (signal features)...")
-        plot_1d_pdp_evolution(
-            {e: models[e] for e in epochs_1d}, X_bg, feature_names, true_idx
-        )
+    # 1D PDP individual: one PNG per feature (all 10), 1 row × PDP_2D_EPOCHS cols
+    print("\n[1/5] 1D PDP individual (all features)...")
+    plot_1d_pdp_individual(models, X_bg, feature_names)
 
-    # 2D PDP grid: по одной паре из каждого any_order GT set (макс. 4 строки)
-    representative_pairs = []
-    seen = set()
-    for ao in ground_truth["any_order"]:
-        ao_sorted = sorted(ao)
-        if len(ao_sorted) >= 2:
-            p = (ao_sorted[0], ao_sorted[1])
-            if p not in seen:
-                representative_pairs.append(p)
-                seen.add(p)
-    if representative_pairs:
-        print(f"[2/3] 2D PDP grid ({len(representative_pairs)} rows × {len(GRID_EPOCHS_2D)} cols)...")
-        plot_2d_pdp_grid(models, X_bg, representative_pairs, feature_names)
+    # 2D PDP individual: one PNG per GT pair, 3×3 grid (GRID_EPOCHS)
+    if pairs:
+        print(f"[2/5] 2D PDP individual ({len(pairs)} figures, 3×3 grid)...")
+        plot_2d_pdp_individual(models, X_bg, pairs, feature_names)
 
-    # Static interaction signature at final epoch
-    if len(pairs) >= 2 and INTERACTION_EPOCH in models:
-        print(f"[3/3] Interaction signature (static) at epoch {INTERACTION_EPOCH}...")
-        plot_interaction_signature(
-            models[INTERACTION_EPOCH], X_bg, pairs[0], pairs[1], feature_names
-        )
+    # Interaction signature individual: one PNG per GT pair (3×3 grid)
+    if pairs:
+        print(f"[3/5] Interaction signatures individual ({len(pairs)} figures)...")
+        plot_interaction_signatures_individual(models, X_bg, pairs, feature_names)
 
-    print(f"\nDone! All figures saved to: {BASE_OUTPUT_DIR}")
+    # Overfitting detection: PDP roughness evolution (signal vs noise)
+    print("\n[4/5] PDP roughness evolution (overfitting detection)...")
+    plot_pdp_roughness_evolution(models, X_bg, feature_names, true_idx_for_overfit, noise_idx)
+
+    # Overfitting detection: PDP range evolution (feature importance inflation)
+    print("\n[5/5] PDP range evolution (overfitting detection)...")
+    plot_pdp_range_evolution(models, X_bg, feature_names, true_idx_for_overfit, noise_idx)
+
+    print(f"\nDone! All figures saved to: {PDP_STATIC_DIR}")
 
 
 if __name__ == "__main__":
