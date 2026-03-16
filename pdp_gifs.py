@@ -14,8 +14,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
+from matplotlib.colors import Normalize
+from matplotlib.cm import ScalarMappable
 
 from pdp_analysis import (
+    compute_1d_pdp,
     compute_2d_pdp,
     compute_interaction_curves,
     model_predict,
@@ -23,10 +26,8 @@ from pdp_analysis import (
     load_meta,
     get_background_data,
     ensure_dirs,
-    BASE_OUTPUT_DIR,
+    PDP_GIFS_DIR,
     UNREG_SNAPSHOT_DIR,
-    GRID_EPOCHS_2D,
-    INTERACTION_EPOCH,
     GRID_POINTS_1D,
     GRID_POINTS_2D,
     MC_MAX_SAMPLES,
@@ -50,6 +51,43 @@ plt.rcParams.update({
 })
 
 
+def create_1d_pdp_gif(models, X_bg, feature_idx, feature_name, all_epochs, out_path, fps=4):
+    """Animate 1D PDP curve per feature across all snapshot epochs. Single panel, one curve per frame."""
+    epochs = sorted(e for e in all_epochs if e in models)
+    if not epochs:
+        return
+    v_min, v_max = X_bg[:, feature_idx].min(), X_bg[:, feature_idx].max()
+    grid = np.linspace(v_min, v_max, GRID_POINTS_1D)
+    all_vals = []
+    n_epochs = len(epochs)
+    for ei, epoch in enumerate(epochs):
+        pdp_vals = compute_1d_pdp(models[epoch], X_bg, feature_idx, grid)
+        all_vals.append(pdp_vals)
+        if (ei + 1) % 10 == 0 or ei == 0 or ei == n_epochs - 1:
+            print(f"      frame {ei + 1}/{n_epochs}", flush=True)
+    all_vals = np.array(all_vals)
+    y_min, y_max = all_vals.min(), all_vals.max()
+
+    fig, ax = plt.subplots(figsize=(8, 4), constrained_layout=True)
+
+    def update(frame_idx):
+        ax.clear()
+        ax.plot(grid, all_vals[frame_idx], color="#2ca02c", linewidth=1.8)
+        ax.set_ylim(y_min, y_max)
+        ax.set_xlim(v_min, v_max)
+        ax.set_xlabel(feature_name, fontsize=10)
+        ax.set_ylabel("Avg. Model Output (PDP)", fontsize=10)
+        ax.set_title(f"Epoch {epochs[frame_idx]}", fontsize=13, fontweight="bold")
+        ax.grid(True, color="#e0e0e0", linestyle="--")
+        return []
+
+    ani = FuncAnimation(fig, update, frames=len(epochs), interval=GIF_INTERVAL_MS, blit=False)
+    print(f"      writing GIF...", flush=True)
+    ani.save(out_path, writer=PillowWriter(fps=fps), dpi=GIF_DPI)
+    plt.close(fig)
+    print(f"  Saved: {out_path}")
+
+
 def create_pdp_gif(models, X_bg, i, j, feature_names, all_epochs, out_path, fps=4):
     """Animate 2D PDP heatmap across epochs. Colorbar created once (vmin/vmax global)."""
     epochs = sorted(e for e in all_epochs if e in models)
@@ -69,9 +107,10 @@ def create_pdp_gif(models, X_bg, i, j, feature_names, all_epochs, out_path, fps=
     Xg, Yg = np.meshgrid(xs, ys)
 
     fig, ax = plt.subplots(figsize=(8, 4), constrained_layout=True)
-    # Colorbar ONCE on first frame; vmin/vmax fixed → scale correct for all frames
-    cf = ax.contourf(Xg, Yg, all_Z[0], levels=20, cmap="viridis", vmin=vmin, vmax=vmax)
-    cbar = fig.colorbar(cf, ax=ax, label="Avg output")
+    # Colorbar ONCE: use ScalarMappable so it persists across ax.clear() in update
+    sm = ScalarMappable(cmap=plt.cm.viridis, norm=Normalize(vmin=vmin, vmax=vmax))
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, label="Avg output")
 
     def update(frame_idx):
         ax.clear()
@@ -210,42 +249,38 @@ def main():
     print(f"\nLoading model snapshots for {len(epochs_all)} epochs...")
     models = load_unreg_models(epochs_all)
 
-    # Representative pairs (one per any_order GT set, max 4 rows)
-    representative_pairs = []
-    seen = set()
-    for ao in ground_truth["any_order"]:
-        ao_sorted = sorted(ao)
-        if len(ao_sorted) >= 2:
-            p = (ao_sorted[0], ao_sorted[1])
-            if p not in seen:
-                representative_pairs.append(p)
-                seen.add(p)
-    if not representative_pairs:
-        representative_pairs = list(pairs)
+    # create_1d_pdp_gif per feature (all features 0..n_feat-1)
+    n_feat = len(feature_names)
+    for feat_idx in range(n_feat):
+        out_gif = os.path.join(PDP_GIFS_DIR, f"pdp_1d_x{feat_idx}.gif")
+        print(f"[1/4] 1D PDP GIF {feat_idx + 1}/{n_feat} (x{feat_idx})...")
+        create_1d_pdp_gif(
+            models, X_bg, feat_idx, feature_names[feat_idx], epochs_all, out_gif, fps=GIF_FPS
+        )
 
-    # create_pdp_gif per representative pair
-    for gif_num, (i, j) in enumerate(representative_pairs, 1):
-        out_gif = os.path.join(BASE_OUTPUT_DIR, f"pdp_2d_x{i}_x{j}.gif")
-        print(f"[1/3] 2D PDP GIF {gif_num}/{len(representative_pairs)} ({feature_names[i]}, {feature_names[j]})...")
+    # create_pdp_gif per GT pair (all pairs from ground_truth["pairwise"])
+    for gif_num, (i, j) in enumerate(pairs, 1):
+        out_gif = os.path.join(PDP_GIFS_DIR, f"pdp_2d_x{i}_x{j}.gif")
+        print(f"[2/4] 2D PDP GIF {gif_num}/{len(pairs)} (x{i}, x{j})...")
         create_pdp_gif(models, X_bg, i, j, feature_names, epochs_all, out_gif, fps=GIF_FPS)
 
     # create_pdp_combined_gif
     if len(pairs) >= 2:
-        out_combined = os.path.join(BASE_OUTPUT_DIR, "pdp_2d_combined.gif")
-        print("[2/3] 2D PDP combined GIF...")
+        out_combined = os.path.join(PDP_GIFS_DIR, "pdp_2d_combined.gif")
+        print("[3/4] 2D PDP combined GIF...")
         create_pdp_combined_gif(
             models, X_bg, pairs[0], pairs[1], feature_names, epochs_all, out_combined, fps=GIF_FPS
         )
 
     # create_interaction_signature_gif
     if len(pairs) >= 2:
-        out_sig_gif = os.path.join(BASE_OUTPUT_DIR, "pdp_interaction_signature.gif")
-        print("[3/3] Interaction signature GIF...")
+        out_sig_gif = os.path.join(PDP_GIFS_DIR, "pdp_interaction_signature.gif")
+        print("[4/4] Interaction signature GIF...")
         create_interaction_signature_gif(
             models, X_bg, pairs[0], pairs[1], feature_names, epochs_all, out_sig_gif, fps=GIF_FPS
         )
 
-    print(f"\nDone! All GIFs saved to: {BASE_OUTPUT_DIR}")
+    print(f"\nDone! All GIFs saved to: {PDP_GIFS_DIR}")
 
 
 if __name__ == "__main__":
