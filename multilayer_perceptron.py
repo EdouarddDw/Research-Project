@@ -1,7 +1,6 @@
 import torch
 import numpy as np
 import torch.nn as nn
-import torch.optim as optim
 import copy
 
 
@@ -85,12 +84,7 @@ def train(
     criterion=nn.MSELoss(reduction="mean"),
     nepochs=100,
     verbose=False,
-    early_stopping=False,
-    patience=5,
-    l1_const=1e-4,
-    l2_const=0,
     learning_rate=0.01,
-    opt_func=optim.Adam,
     device=torch.device("cpu"),
     save_snapshots=False,
     snapshot_epochs=None,
@@ -111,7 +105,7 @@ def train(
     """
     import os
     
-    optimizer = opt_func(net.parameters(), lr=learning_rate, weight_decay=l2_const)
+    optimizer = torch.optim.SGD(net.parameters(), lr=learning_rate)
     
     # Setup snapshot saving
     snapshots = {}  # epoch -> state_dict
@@ -130,18 +124,9 @@ def train(
             losses.append(loss)
         return torch.stack(losses).mean()
 
-    best_loss = float("inf")
-    best_net = None
-
-    if "val" not in data_loaders:
-        early_stopping = False
-
-    patience_counter = 0
 
     if verbose:
         print("starting to train")
-        if early_stopping:
-            print("early stopping enabled")
         if save_snapshots:
             print(f"saving snapshots at epochs: {snapshot_epochs}")
 
@@ -156,11 +141,7 @@ def train(
             outputs = net(inputs)
             loss = criterion(outputs, labels).mean()
 
-            reg_loss = 0
-            for name, param in net.named_parameters():
-                if "interaction_mlp" in name and "weight" in name:
-                    reg_loss += torch.sum(torch.abs(param))
-            (loss + reg_loss * l1_const).backward()
+            loss.backward()
             optimizer.step()
             running_loss += loss.item()
             run_count += 1
@@ -184,19 +165,6 @@ def train(
                         "[epoch %d, total %d] train loss: %.4f, val loss: %.4f"
                         % (epoch + 1, nepochs, running_loss / run_count, val_loss)
                     )
-            if early_stopping:
-                if val_loss < best_loss:
-                    best_loss = val_loss
-                    best_net = copy.deepcopy(net)
-                    patience_counter = 0
-                else:
-                    patience_counter += 1
-                    if patience_counter > patience:
-                        net = best_net
-                        val_loss = best_loss
-                        if verbose:
-                            print("early stopping!")
-                        break
 
             prev_loss = running_loss
             running_loss = 0.0
