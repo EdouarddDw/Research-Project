@@ -249,3 +249,123 @@ def create_interaction_animation(
         return [im_pw, im_ao, title] + [a for row in annot_pw for a in row] + [a for row in annot_ao for a in row]
     
     return fig, update
+
+
+def detect_overfitting_epoch(
+    epochs,
+    train_losses,
+    val_losses,
+    patience=3,
+    min_delta=0.0,
+    smooth_window=3,
+):
+    """Detect overfitting onset from train/validation loss history."""
+    epochs = np.asarray(epochs)
+    train_losses = np.asarray(train_losses, dtype=float)
+    val_losses = np.asarray(val_losses, dtype=float)
+
+    if len(epochs) == 0:
+        raise ValueError("epochs must not be empty")
+
+    if not (len(epochs) == len(train_losses) == len(val_losses)):
+        raise ValueError("epochs, train_losses, and val_losses must have the same length")
+
+    def moving_average(x, window):
+        if window <= 1 or len(x) < window:
+            return x.copy()
+        kernel = np.ones(window) / window
+        smoothed = np.convolve(x, kernel, mode="valid")
+        pad_left = window // 2
+        pad_right = len(x) - len(smoothed) - pad_left
+        return np.pad(smoothed, (pad_left, pad_right), mode="edge")
+
+    smooth_train = moving_average(train_losses, smooth_window)
+    smooth_val = moving_average(val_losses, smooth_window)
+
+    best_idx = int(np.argmin(smooth_val))
+    best_val = smooth_val[best_idx]
+    stale = 0
+    onset_idx = best_idx
+
+    for i in range(best_idx + 1, len(epochs)):
+        val_improved = smooth_val[i] < (best_val - min_delta)
+        train_not_worse = smooth_train[i] <= (smooth_train[i - 1] + min_delta)
+
+        if val_improved:
+            best_val = smooth_val[i]
+            best_idx = i
+            stale = 0
+            continue
+
+        stale = stale + 1 if train_not_worse else 0
+        if stale >= patience:
+            onset_idx = i - patience + 1
+            break
+    else:
+        onset_idx = best_idx
+
+    return int(epochs[onset_idx]), int(epochs[best_idx]), smooth_train, smooth_val
+
+
+def compute_interaction_matrices_from_snapshots(
+    snapshot_dir: str,
+    snapshot_epochs: list,
+    num_features: int,
+    hidden_units: list,
+    use_main_effect_nets: bool,
+):
+    """Load snapshots and compute pairwise/any-order interaction matrices."""
+    from multilayer_perceptron import MLP, get_weights
+    from neural_interaction_detection import get_interactions, interactions_to_matrix
+
+    snapshots = load_snapshots(snapshot_dir, snapshot_epochs, device="cpu")
+    if not snapshots:
+        return {}, {}, []
+
+    model = MLP(
+        num_features,
+        hidden_units,
+        use_main_effect_nets=use_main_effect_nets,
+    )
+    model.eval()
+
+    pairwise_matrices = {}
+    anyorder_matrices = {}
+
+    for epoch, state_dict in sorted(snapshots.items()):
+        model.load_state_dict(state_dict)
+
+        weights = get_weights(model)
+        pairwise = get_interactions(weights, pairwise=True, one_indexed=True)
+        anyorder = get_interactions(weights, pairwise=False, one_indexed=True)
+
+        pairwise_matrices[epoch] = interactions_to_matrix(pairwise, num_features)
+        anyorder_matrices[epoch] = interactions_to_matrix(anyorder, num_features)
+
+    available_epochs = sorted(pairwise_matrices.keys())
+    return pairwise_matrices, anyorder_matrices, available_epochs
+
+
+def main():
+    """Lightweight smoke checks for utility functions when run as a script."""
+    set_seed(42)
+
+    X = np.random.randn(100, 10)
+    y = np.random.randn(100)
+    loaders = preprocess_data(
+        X,
+        y,
+        valid_size=20,
+        test_size=20,
+        std_scale=False,
+        get_torch_loaders=True,
+        batch_size=16,
+    )
+
+    print("utils.py smoke check")
+    print(f"splits: {list(loaders.keys())}")
+    print(f"train batches: {len(loaders['train'])}")
+
+
+if __name__ == "__main__":
+    main()
