@@ -61,9 +61,7 @@ for noise_std in NOISE_LEVELS:
         data_loaders = preprocess_data(X, Y, valid_size=10000, test_size=10000,
                                        std_scale=True, get_torch_loaders=True)
         print(f"Data: X={X.shape}, Y={Y.shape}")
-        print(f"GT pairwise:   {gt['pairwise']}")
-        print(f"GT any-order:  {gt['any_order']}")
-
+        print(f"GT interactions: {gt}")
         # 2. Train
         model = MLP(NUM_FEATURES, HIDDEN_UNITS,
                     use_main_effect_nets=USE_MAIN_EFFECT_NETS).to(device)
