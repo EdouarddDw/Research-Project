@@ -9,7 +9,7 @@ Static PNG figures only.
 Run AFTER train_mlp_snapshots.py has generated unregularized model snapshots in:
     ./outputs/snapshots/unregularized/model_epoch_{N}.pt
 
-All figures are saved under: ./outputs/snapshots/
+All figures are saved under: ./outputs/ice/static/
 
 For GIF animations run separately: python ice_gifs.py
 """
@@ -25,7 +25,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
-from matplotlib.colors import ListedColormap
+from matplotlib.colors import ListedColormap, Normalize
+from matplotlib.cm import ScalarMappable
 
 from multilayer_perceptron import MLP
 from train_mlp_snapshots import (
@@ -71,11 +72,14 @@ plt.rcParams.update({
 # ─────────────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────────────
-BASE_OUTPUT_DIR = "./outputs/snapshots"
-UNREG_SNAPSHOT_DIR = os.path.join(BASE_OUTPUT_DIR, "unregularized")
+SNAPSHOT_DIR       = "./outputs/snapshots"       # unregularized/, l2/ live here
+UNREG_SNAPSHOT_DIR = os.path.join(SNAPSHOT_DIR, "unregularized")
+ICE_STATIC_DIR     = "./outputs/ice/static"      # all PNG from ice_hstat_analysis.py
+ICE_GIFS_DIR       = "./outputs/ice/gifs"       # all GIF from ice_gifs.py
 
+# 9 epochs → 3×3 grid for ALL static plots (ICE, ice_slopes, centered ICE)
+GRID_EPOCHS: List[int] = [1, 3, 5, 10, 20, 30, 50, 150, 300]
 EPOCHS_ALL: List[int] = [1, 10, 50, 100, 300]   # for H-stat line plot
-EPOCHS_ICE: List[int] = [1, 50, 300]            # for static ICE grid
 EPOCH_HSTAT_300: int = 300
 
 GRID_POINTS_1D: int = 60
@@ -91,7 +95,8 @@ GIF_INTERVAL_MS: int = 250
 # HELPERS
 # ─────────────────────────────────────────────────────────────
 def ensure_dirs() -> None:
-    os.makedirs(BASE_OUTPUT_DIR, exist_ok=True)
+    os.makedirs(ICE_STATIC_DIR, exist_ok=True)
+    os.makedirs(ICE_GIFS_DIR, exist_ok=True)
     if not os.path.isdir(UNREG_SNAPSHOT_DIR):
         raise FileNotFoundError(
             f"Snapshot directory not found: {UNREG_SNAPSHOT_DIR}\n"
@@ -254,25 +259,22 @@ def compute_hstat(model: MLP,
                   grid_points: int = GRID_POINTS_2D) -> float:
     """
     Compute Friedman H-statistic for feature pair (i, j).
-
-    H²(i,j) = Σ [PDP_ij(xi, xj) - PDP_i(xi) - PDP_j(xj)]²
-               ÷ Σ [PDP_ij(xi, xj)]²
+    Centered formula: interaction = PDP_ij - PDP_i - PDP_j + overall_mean.
     """
     xs, ys, pdp_ij = compute_2d_pdp(model, X_bg, i, j, grid_points=grid_points)
 
-    # 1D PDPs obtained by averaging the 2D surface along axes
-    pdp_i = pdp_ij.mean(axis=0)  # average over j (rows)
-    pdp_j = pdp_ij.mean(axis=1)  # average over i (cols)
+    pdp_i = pdp_ij.mean(axis=0)
+    pdp_j = pdp_ij.mean(axis=1)
+    overall_mean = pdp_ij.mean()
 
-    # Broadcast to full grid
-    diff = pdp_ij - (pdp_i[None, :] + pdp_j[:, None])
+    # Friedman's centered formula
+    diff = pdp_ij - pdp_i[None, :] - pdp_j[:, None] + overall_mean
     num = float(np.sum(diff ** 2))
-    den = float(np.sum(pdp_ij ** 2))
+    den = float(np.sum((pdp_ij - overall_mean) ** 2))
 
     if den <= 0.0:
         return 0.0
-    h2 = max(num / den, 0.0)
-    return float(np.sqrt(h2))
+    return float(np.sqrt(max(num / den, 0.0)))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -424,10 +426,171 @@ def plot_ice_evolution(models: Dict[int, MLP],
         frameon=True,
     )
 
-    out_path = os.path.join(BASE_OUTPUT_DIR, out_filename)
+    out_path = os.path.join(ICE_STATIC_DIR, out_filename)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     print(f"  Saved: {out_path}")
+
+
+def plot_ice_individual(models: Dict[int, MLP],
+                        X_bg: np.ndarray,
+                        feature_names: List[str],
+                        feat_indices: List[int]) -> None:
+    """
+    For each feature in the given index list, save one PNG: 3×3 grid (GRID_EPOCHS).
+    Each subplot: clustered ICE curves at that epoch (no histogram row).
+    File: ice_evolution_x{i}.png
+    """
+    epochs = [e for e in GRID_EPOCHS if e in models]
+    if not epochs or not feat_indices:
+        return
+    cluster_colors = {"pos": "#e74c3c", "neu": "#95a5a6", "neg": "#2980b9"}
+    for feat_idx in feat_indices:
+        feature_name = feature_names[feat_idx]
+        print(f"    ICE individual x{feat_idx} ({feature_name})...", flush=True)
+        v_min, v_max = X_bg[:, feat_idx].min(), X_bg[:, feat_idx].max()
+        grid = np.linspace(v_min, v_max, GRID_POINTS_1D)
+        fig, axes = plt.subplots(
+            3, 3,
+            figsize=(12, 10),
+            sharex="col", sharey=False, constrained_layout=True,
+        )
+        axes_flat = axes.flatten()
+        fig.suptitle(
+            f"ICE — {feature_name} (x{feat_idx}): Clustered by Slope — Evolution by Epoch",
+            fontsize=13, fontweight="bold", y=1.02,
+        )
+        for idx, epoch in enumerate(epochs):
+            model = models[epoch]
+            ice = compute_ice(model, X_bg, feat_idx, grid)
+            pdp = ice.mean(axis=0)
+            sample_pos, sample_neu, sample_neg, slopes = cluster_ice_by_slope(
+                ice, grid, n_sample=30, seed=42
+            )
+            threshold = 0.3 * slopes.std()
+            n_pos = int((slopes > threshold).sum())
+            n_neu = int((np.abs(slopes) <= threshold).sum())
+            n_neg = int((slopes < -threshold).sum())
+            ax_ice = axes_flat[idx]
+            for cluster_name, idx_array, color, label_tpl in [
+                ("pos", sample_pos, cluster_colors["pos"], f"↗ Pos (n={n_pos})"),
+                ("neu", sample_neu, cluster_colors["neu"], f"→ Neu (n={n_neu})"),
+                ("neg", sample_neg, cluster_colors["neg"], f"↘ Neg (n={n_neg})"),
+            ]:
+                if len(idx_array) == 0:
+                    continue
+                for k in idx_array:
+                    ax_ice.plot(grid, ice[k], color=color, alpha=0.15, linewidth=0.8)
+                cluster_mean = ice[idx_array].mean(axis=0)
+                ax_ice.plot(grid, cluster_mean, color=color, linewidth=2.5, label=label_tpl)
+            ax_ice.plot(grid, pdp, color="black", linestyle="--", linewidth=2.2, label="PDP")
+            ax_ice.set_title(f"Epoch {epoch}")
+            ax_ice.set_xlabel(feature_name)
+            if idx % 3 == 0:
+                ax_ice.set_ylabel("Model output")
+            ax_ice.xaxis.set_major_locator(ticker.MaxNLocator(6))
+        handles, labels = axes_flat[-1].get_legend_handles_labels()
+        fig.legend(handles, labels, loc="lower center", ncol=4, bbox_to_anchor=(0.5, -0.02), frameon=True)
+        out_path = os.path.join(ICE_STATIC_DIR, f"ice_evolution_x{feat_idx}.png")
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        print(f"  Saved: {out_path}")
+
+
+def plot_ice_slopes_individual(models: Dict[int, MLP],
+                                X_bg: np.ndarray,
+                                feature_names: List[str],
+                                feat_indices: List[int]) -> None:
+    """
+    For each feature in the given index list, save one PNG: 3×3 grid of slope histograms.
+    File: ice_slopes_x{i}.png
+    """
+    epochs = [e for e in GRID_EPOCHS if e in models]
+    if not epochs or not feat_indices:
+        return
+    cluster_colors = {"pos": "#e74c3c", "neg": "#2980b9"}
+    for feat_idx in feat_indices:
+        feature_name = feature_names[feat_idx]
+        print(f"    ICE slopes x{feat_idx} ({feature_name})...", flush=True)
+        v_min, v_max = X_bg[:, feat_idx].min(), X_bg[:, feat_idx].max()
+        grid = np.linspace(v_min, v_max, GRID_POINTS_1D)
+        fig, axes = plt.subplots(
+            3, 3,
+            figsize=(12, 10),
+            constrained_layout=True,
+        )
+        axes_flat = axes.flatten()
+        fig.suptitle(
+            f"ICE Slope Distribution — x{feat_idx} ({feature_name}) — Evolution by Epoch",
+            fontsize=13, fontweight="bold", y=1.02,
+        )
+        for idx, epoch in enumerate(epochs):
+            model = models[epoch]
+            ice = compute_ice(model, X_bg, feat_idx, grid)
+            _, _, _, slopes = cluster_ice_by_slope(ice, grid, n_sample=30, seed=42)
+            threshold = 0.3 * slopes.std()
+            ax_hist = axes_flat[idx]
+            ax_hist.hist(slopes, bins=30, color="#34495e", alpha=0.7, edgecolor="white")
+            ax_hist.axvline(threshold, color=cluster_colors["pos"], linestyle="--", linewidth=1.5)
+            ax_hist.axvline(-threshold, color=cluster_colors["neg"], linestyle="--", linewidth=1.5)
+            ax_hist.set_xlabel("ICE curve slope")
+            if idx % 3 == 0:
+                ax_hist.set_ylabel("Count")
+            ax_hist.set_title(f"Epoch {epoch}")
+        out_path = os.path.join(ICE_STATIC_DIR, f"ice_slopes_x{feat_idx}.png")
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        print(f"  Saved: {out_path}")
+
+
+def plot_ice_centered_individual(models: Dict[int, MLP],
+                                 X_bg: np.ndarray,
+                                 feature_names: List[str],
+                                 feat_indices: List[int]) -> None:
+    """
+    For each feature in the given index list, save one PNG: 3×3 grid (GRID_EPOCHS).
+    Each subplot: centered ICE (mean c-ICE ± std) for that epoch.
+    File: ice_centered_x{i}.png
+    """
+    epochs = [e for e in GRID_EPOCHS if e in models]
+    if not epochs or not feat_indices:
+        return
+    for feat_idx in feat_indices:
+        feature_name = feature_names[feat_idx]
+        print(f"    ICE centered individual x{feat_idx} ({feature_name})...", flush=True)
+        v_min, v_max = X_bg[:, feat_idx].min(), X_bg[:, feat_idx].max()
+        grid = np.linspace(v_min, v_max, GRID_POINTS_1D)
+        fig, axes = plt.subplots(
+            3, 3,
+            figsize=(12, 10),
+            constrained_layout=True,
+        )
+        axes_flat = axes.flatten()
+        fig.suptitle(
+            f"Centered ICE (c-ICE) — x{feat_idx} ({feature_name}) — Evolution by Epoch",
+            fontsize=13, fontweight="bold", y=1.02,
+        )
+        for idx, epoch in enumerate(epochs):
+            model = models[epoch]
+            ice = compute_ice(model, X_bg, feat_idx, grid)
+            ice_centered = ice - ice[:, [0]]
+            mean_centered = ice_centered.mean(axis=0)
+            std_centered = ice_centered.std(axis=0)
+            ax = axes_flat[idx]
+            ax.fill_between(
+                grid, mean_centered - std_centered, mean_centered + std_centered,
+                color="#2ca02c", alpha=0.2,
+            )
+            ax.plot(grid, mean_centered, color="#006400", linewidth=2.3)
+            ax.axhline(0.0, color="#555555", linewidth=0.8, linestyle="--")
+            ax.set_title(f"Epoch {epoch}")
+            ax.set_xlabel(feature_name)
+            if idx % 3 == 0:
+                ax.set_ylabel("Centered model output")
+        out_path = os.path.join(ICE_STATIC_DIR, f"ice_centered_x{feat_idx}.png")
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        print(f"  Saved: {out_path}")
 
 
 def plot_ice_centered(model: MLP,
@@ -511,7 +674,7 @@ def plot_ice_centered(model: MLP,
         ),
     )
     ax.legend(loc="upper right")
-    out_path = os.path.join(BASE_OUTPUT_DIR, out_filename)
+    out_path = os.path.join(ICE_STATIC_DIR, out_filename)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     print(f"  Saved: {out_path}")
@@ -536,8 +699,13 @@ def plot_hstat_evolution(models: Dict[int, MLP],
     styles = [
         ("#1f77b4", "-"),
         ("#d62728", "--"),
-        ("#7f7f7f", ":"),
         ("#2ca02c", "-."),
+        ("#9467bd", ":"),
+        ("#8c564b", "-"),
+        ("#e377c2", "--"),
+        ("#7f7f7f", "-."),
+        ("#bcbd22", ":"),
+        ("#17becf", "-"),
     ]
     labels = pair_labels[: len(pairs)]
     while len(styles) < len(pairs):
@@ -594,7 +762,7 @@ def plot_hstat_evolution(models: Dict[int, MLP],
         ),
     )
 
-    out_path = os.path.join(BASE_OUTPUT_DIR, out_filename)
+    out_path = os.path.join(ICE_STATIC_DIR, out_filename)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     print(f"  Saved: {out_path}")
@@ -665,7 +833,91 @@ def plot_hstat_heatmap(model: MLP,
 
     cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label("H-statistic")
-    out_path = os.path.join(BASE_OUTPUT_DIR, out_filename)
+    out_path = os.path.join(ICE_STATIC_DIR, out_filename)
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"  Saved: {out_path}")
+
+
+def plot_hstat_heatmap_grid(models: Dict[int, MLP],
+                             X_bg: np.ndarray,
+                             feature_names: List[str],
+                             true_idx: List[int],
+                             out_filename: str) -> None:
+    """
+    3×3 grid of H-stat heatmaps: one subplot per epoch (GRID_EPOCHS).
+    Each subplot: heatmap of all signal-feature pairs at that epoch.
+    Shared vmax across all 9 for comparable colour scale.
+    File: hstat_heatmap_grid.png
+    """
+    epochs = [e for e in GRID_EPOCHS if e in models]
+    n_true = len(true_idx)
+    if not epochs or n_true == 0:
+        print("  [ice_hstat] No GRID_EPOCHS in models or no true_idx; skipping H-stat heatmap grid.")
+        return
+
+    # Precompute H matrices and global vmax
+    H_list = []
+    for epoch in epochs:
+        model = models[epoch]
+        H = np.full((n_true, n_true), np.nan, dtype=float)
+        for ii in range(n_true):
+            for jj in range(ii + 1, n_true):
+                i, j = true_idx[ii], true_idx[jj]
+                h = compute_hstat(model, X_bg, i, j, grid_points=GRID_POINTS_2D)
+                H[ii, jj] = h
+                H[jj, ii] = h
+        H_list.append(H)
+    vmax = max(np.nanmax(H) for H in H_list)
+    if not (vmax > 0):
+        vmax = 1.0
+    vmax = vmax * 1.05
+
+    names_subset = [feature_names[k] for k in true_idx]
+    cmap = plt.get_cmap("Reds").with_extremes(bad="white")
+
+    fig, axes = plt.subplots(
+        3, 3,
+        figsize=(12, 10),
+        constrained_layout=True,
+    )
+    axes_flat = axes.flatten()
+    fig.suptitle(
+        "H-Statistic Heatmap — Evolution by Epoch (Signal Features)",
+        fontsize=13,
+        fontweight="bold",
+        y=1.02,
+    )
+
+    for idx, (epoch, H) in enumerate(zip(epochs, H_list)):
+        ax = axes_flat[idx]
+        H_masked = np.ma.masked_invalid(H)
+        im = ax.imshow(H_masked, cmap=cmap, vmin=0.0, vmax=vmax)
+        ax.set_xticks(range(n_true))
+        ax.set_yticks(range(n_true))
+        ax.set_xticklabels(names_subset)
+        ax.set_yticklabels(names_subset)
+        plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+        ax.set_title(f"Epoch {epoch}")
+        for ii in range(n_true):
+            for jj in range(n_true):
+                if ii == jj:
+                    continue
+                val = H[ii, jj]
+                if np.isnan(val):
+                    continue
+                ax.text(
+                    jj, ii, f"{val:.2f}",
+                    ha="center", va="center", fontsize=7,
+                    color="black" if val < 0.6 * vmax else "white",
+                )
+
+    # Single shared colorbar
+    sm = ScalarMappable(cmap=cmap, norm=Normalize(vmin=0.0, vmax=vmax))
+    sm.set_array([])
+    fig.colorbar(sm, ax=axes, fraction=0.02, pad=0.02, label="H-statistic")
+
+    out_path = os.path.join(ICE_STATIC_DIR, out_filename)
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     print(f"  Saved: {out_path}")
@@ -686,75 +938,64 @@ def main() -> None:
     pairs = ground_truth["pairwise"]
     true_idx = ground_truth["true_idx"]
     noise_idx = ground_truth["noise_idx"]
+    all_feature_idx = list(range(len(feature_names)))  # all 10 features for ICE
 
     print("\nLoading background data...")
     X_bg, _ = get_background_data(MC_MAX_SAMPLES)
     print(f"  Background samples: {X_bg.shape}")
 
-    # Load all snapshot epochs for GIFs; also need EPOCHS_ALL and EPOCHS_ICE for static plots
+    # Load all snapshot epochs (GRID_EPOCHS, EPOCHS_ALL, etc.)
     epochs_all = sorted(e for e in SNAPSHOT_EPOCHS if e <= 300)
-    epochs_for_plots = sorted(set(epochs_all) | set(EPOCHS_ALL) | set(EPOCHS_ICE))
+    epochs_for_plots = sorted(set(epochs_all) | set(EPOCHS_ALL) | set(GRID_EPOCHS))
     print(f"\nLoading model snapshots for {len(epochs_for_plots)} epochs...")
     models = load_unreg_models(epochs_for_plots)
-    models_subset = {e: models[e] for e in EPOCHS_ICE}
 
-    # 1. ICE evolution grid (static) for first two GT pair features
-    if len(pairs) >= 1:
-        print("\n[1/5] ICE evolution grid (first GT pair feature)...")
-        i0 = pairs[0][0]
-        plot_ice_evolution(
-            models_subset,
-            X_bg,
-            feature_idx=i0,
-            feature_name=feature_names[i0],
-            annotation_text="ICE evolution for signal feature",
-            out_filename=f"ice_evolution_x{i0}.png",
-        )
-    if len(pairs) >= 2:
-        print("[2/5] ICE evolution grid (second GT pair feature)...")
-        i1 = pairs[1][0]
-        plot_ice_evolution(
-            models_subset,
-            X_bg,
-            feature_idx=i1,
-            feature_name=feature_names[i1],
-            annotation_text="ICE evolution for signal feature",
-            out_filename=f"ice_evolution_x{i1}.png",
+    # 1. ICE individual: one PNG per feature — all 10 (3×3 grid)
+    if all_feature_idx:
+        print("\n[1/6] ICE individual (all features, 3×3 grid)...")
+        plot_ice_individual(models, X_bg, feature_names, all_feature_idx)
+
+    # 2. ICE slope histograms: one PNG per feature — all 10 (3×3 grid)
+    if all_feature_idx:
+        print("[2/6] ICE slopes (3×3 grid)...")
+        plot_ice_slopes_individual(models, X_bg, feature_names, all_feature_idx)
+
+    # 3. Centered ICE individual: one PNG per feature — all 10 (3×3 grid)
+    if all_feature_idx:
+        print("[3/6] Centered ICE individual (all features, 3×3 grid)...")
+        plot_ice_centered_individual(models, X_bg, feature_names, all_feature_idx)
+
+    # 4. H-statistic evolution: all GT pairwise pairs (9 lines), epochs = GRID_EPOCHS, no noise
+    hstat_pairs = list(pairs)
+    pair_labels = [f"x{p[0]}×x{p[1]}" for p in hstat_pairs]
+    epochs_hstat = [e for e in GRID_EPOCHS if e in models]
+    if epochs_hstat and hstat_pairs:
+        print("[4/6] Friedman H-statistic evolution (all GT pairs, GRID_EPOCHS)...")
+        plot_hstat_evolution(
+            models={e: models[e] for e in epochs_hstat},
+            X_bg=X_bg,
+            epochs=epochs_hstat,
+            hstat_pairs=hstat_pairs,
+            feature_names=feature_names,
+            pair_labels=pair_labels,
+            out_filename="hstat_evolution.png",
         )
 
-    # 2. Centered ICE at final epoch
+    # 5. H-statistic heatmap grid: 3×3 by GRID_EPOCHS
+    if true_idx:
+        print("[5/6] H-statistic heatmap grid (3×3 by epoch)...")
+        plot_hstat_heatmap_grid(
+            models=models,
+            X_bg=X_bg,
+            feature_names=feature_names,
+            true_idx=true_idx,
+            out_filename="hstat_heatmap_grid.png",
+        )
+
+    # 6. H-statistic heatmap (single epoch) at epoch 300
     if true_idx and EPOCH_HSTAT_300 in models:
-        print(f"[3/5] Centered ICE at epoch {EPOCH_HSTAT_300}...")
+        print(f"[6/6] H-statistic heatmap at epoch {EPOCH_HSTAT_300}...")
         model_300 = models[EPOCH_HSTAT_300]
-        fid = true_idx[0]
-        plot_ice_centered(
-            model_300,
-            X_bg,
-            feature_idx=fid,
-            feature_label=feature_names[fid],
-            out_filename=f"ice_centered_x{fid}.png",
-        )
-
-    # 3. H-statistic evolution (line plot)
-    hstat_pairs = list(pairs[:2])
-    pair_labels = [f"x{p[0]}×x{p[1]} (GT)" for p in hstat_pairs]
-    if len(noise_idx) >= 2:
-        hstat_pairs.append((noise_idx[0], noise_idx[1]))
-        pair_labels.append(f"x{noise_idx[0]}×x{noise_idx[1]} (noise)")
-    print("[4/5] Friedman H-statistic evolution...")
-    plot_hstat_evolution(
-        models={e: models[e] for e in EPOCHS_ALL if e in models},
-        X_bg=X_bg,
-        epochs=EPOCHS_ALL,
-        hstat_pairs=hstat_pairs,
-        feature_names=feature_names,
-        pair_labels=pair_labels,
-        out_filename="hstat_evolution.png",
-    )
-
-    # 4. H-statistic heatmap (static) at epoch 300
-    if true_idx and EPOCH_HSTAT_300 in models:
-        print(f"[5/5] H-statistic heatmap at epoch {EPOCH_HSTAT_300}...")
         plot_hstat_heatmap(
             model=model_300,
             X_bg=X_bg,
@@ -763,7 +1004,7 @@ def main() -> None:
             out_filename="hstat_heatmap_epoch300.png",
         )
 
-    print(f"\nDone! All ICE and H-statistic figures saved to: {BASE_OUTPUT_DIR}")
+    print(f"\nDone! All ICE and H-statistic figures saved to: {ICE_STATIC_DIR}")
 
 
 if __name__ == "__main__":
