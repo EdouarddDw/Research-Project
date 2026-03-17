@@ -2,7 +2,7 @@ import os
 import re
 from dataclasses import dataclass
 from itertools import combinations
-from typing import Callable
+from typing import Callable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -40,7 +40,7 @@ class NIDPlotConfig:
     fallback_snapshot_dirs: tuple[str, ...] = tuple(SNAPSHOT_FALLBACK_DIRS)
     fallback_function: int = 0
     fallback_noise: float = 0.1
-    device: str = "cpu"
+    device: str = "mps" if torch.backends.mps.is_available() else "cuda"
 
 
 @dataclass
@@ -241,6 +241,88 @@ def plot_non_gt_emergence(
     return fig, ax
 
 
+# Helper: epochwise delta calculation for plotting
+def _compute_epochwise_delta_series(values: pd.Series, epochs: Sequence[int]) -> pd.Series:
+    """Return first differences aligned to the provided sorted epoch index."""
+    s = values.reindex(epochs).sort_index()
+    return s.diff()
+
+
+# Plotting delta of non-GT emergence
+def plot_non_gt_emergence_delta(
+    df: pd.DataFrame,
+    save_path: str | None = None,
+    title: str = "Epoch to epoch increase in non-ground-truth interaction strength",
+    ax: plt.Axes | None = None,
+):
+    if save_path is None:
+        save_path = os.path.join(BASE_OUT, "non_gt_emergence_delta_noise_comparison.png")
+
+    created_fig = False
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        created_fig = True
+    else:
+        fig = ax.figure
+
+    for noise, color in [(0.1, "steelblue"), (0.5, "darkorange")]:
+        d = df[df["noise"] == noise].copy()
+        if d.empty:
+            continue
+
+        all_epochs = sorted(d["epoch"].unique())
+        delta_rows = []
+
+        for fn_idx, fn_df in d.groupby("function"):
+            fn_series = (
+                fn_df.groupby("epoch")["frac_non_gt_strength"]
+                .median()
+                .sort_index()
+            )
+            deltas = _compute_epochwise_delta_series(fn_series, all_epochs)
+            for epoch, delta in deltas.items():
+                if pd.isna(delta):
+                    continue
+                delta_rows.append({
+                    "function": fn_idx,
+                    "epoch": epoch,
+                    "delta_frac_non_gt_strength": float(delta),
+                })
+
+        if not delta_rows:
+            continue
+
+        delta_df = pd.DataFrame(delta_rows)
+        g = delta_df.groupby("epoch")["delta_frac_non_gt_strength"]
+        med = g.median()
+        q25 = g.quantile(0.25)
+        q75 = g.quantile(0.75)
+
+        ax.plot(
+            med.index,
+            med.values,
+            color=color,
+            linewidth=2,
+            label=f"noise={noise} (median)",
+        )
+        ax.fill_between(med.index, q25.values, q75.values, color=color, alpha=0.20)
+
+    ax.axhline(0.0, color="black", linewidth=1, alpha=0.6)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Δ fraction of non-GT pairwise interaction strength")
+    ax.set_title(title)
+    ax.grid(alpha=0.3)
+    ax.legend()
+
+    if created_fig:
+        plt.tight_layout()
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+        print(f"Saved: {save_path}")
+
+    return fig, ax
+
+
 def build_non_gt_dataframe(config: NIDPlotConfig | None = None) -> pd.DataFrame:
     analyzer = NIDInteractionAnalyzer(config=config)
     return analyzer.build_non_gt_dataframe()
@@ -301,6 +383,11 @@ def main():
     plot_non_gt_emergence(
         df,
         save_path=os.path.join(config.base_out, "non_gt_emergence_noise_comparison.png"),
+    )
+
+    plot_non_gt_emergence_delta(
+        df,
+        save_path=os.path.join(config.base_out, "non_gt_emergence_delta_noise_comparison.png"),
     )
 
 

@@ -65,6 +65,7 @@ def main(test_mode: bool = False, dry_run: bool = False):
         run_num_samples = 3000
         run_nepochs = 10
         run_snapshot_epochs = [5, 10]
+        run_sanity_check_every = 2
         run_functions = [0]
         run_noise_levels = [0.1]
         run_valid_size = 500
@@ -74,6 +75,7 @@ def main(test_mode: bool = False, dry_run: bool = False):
         run_num_samples = NUM_SAMPLES
         run_nepochs = NEPOCHS
         run_snapshot_epochs = SNAPSHOT_EPOCHS
+        run_sanity_check_every = 5
         run_functions = FUNCTIONS
         run_noise_levels = NOISE_LEVELS
         run_valid_size = 10000
@@ -88,6 +90,7 @@ def main(test_mode: bool = False, dry_run: bool = False):
         print(f"  noise_levels: {run_noise_levels}")
         print(f"  num_samples: {run_num_samples}")
         print(f"  epochs: {run_nepochs}")
+        print(f"  sanity_check_every: {run_sanity_check_every}")
         print(f"  snapshot_epochs: {run_snapshot_epochs}")
         print(f"  valid_size/test_size: {run_valid_size}/{run_test_size}")
         return
@@ -135,6 +138,7 @@ def main(test_mode: bool = False, dry_run: bool = False):
                 save_snapshots=True,
                 snapshot_epochs=run_snapshot_epochs,
                 snapshot_dir=snap_dir,
+                sanity_check_every=run_sanity_check_every,
             )
             print(f"Test loss: {test_loss:.4f}")
 
