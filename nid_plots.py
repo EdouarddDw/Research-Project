@@ -40,8 +40,11 @@ class NIDPlotConfig:
     fallback_snapshot_dirs: tuple[str, ...] = tuple(SNAPSHOT_FALLBACK_DIRS)
     fallback_function: int = 0
     fallback_noise: float = 0.1
-    device: str = "mps" if torch.backends.mps.is_available() else "cuda"
-    device: str = "cuda"
+    device: str = (
+        "cuda"
+        if torch.cuda.is_available()
+        else "mps" if torch.backends.mps.is_available() else "cpu"
+    )
 
 
 @dataclass
@@ -51,7 +54,10 @@ class SnapshotInteractionMetrics:
     epoch: int
     total_strength: float
     non_gt_strength: float
-    frac_non_gt_strength: float
+    delta_target_placeholder: float = 0.0
+    total_detected_pairs: int = 0
+    non_gt_detected_pairs: int = 0
+    pct_non_gt_detected_pairs: float = 0.0
 
 
 class NIDInteractionAnalyzer:
@@ -110,21 +116,32 @@ class NIDInteractionAnalyzer:
 
         total_strength = 0.0
         non_gt_strength = 0.0
+        total_detected_pairs = 0
+        non_gt_detected_pairs = 0
+
         for (i, j), s in pairwise:
             s = float(max(0.0, s))
-            total_strength += s
             pair = tuple(sorted((int(i), int(j))))
+
+            if s > 0.0:
+                total_detected_pairs += 1
+                if pair not in gt_pairs:
+                    non_gt_detected_pairs += 1
+
+            total_strength += s
             if pair not in gt_pairs:
                 non_gt_strength += s
 
-        frac_non_gt = non_gt_strength / (total_strength + 1e-12)
+        pct_non_gt_detected_pairs = non_gt_detected_pairs / (total_detected_pairs + 1e-12)
         return SnapshotInteractionMetrics(
             noise=noise,
             function=fn_idx,
             epoch=epoch,
             total_strength=total_strength,
             non_gt_strength=non_gt_strength,
-            frac_non_gt_strength=frac_non_gt,
+            total_detected_pairs=total_detected_pairs,
+            non_gt_detected_pairs=non_gt_detected_pairs,
+            pct_non_gt_detected_pairs=pct_non_gt_detected_pairs,
         )
 
     def build_non_gt_dataframe(self) -> pd.DataFrame:
@@ -152,7 +169,9 @@ class NIDInteractionAnalyzer:
                         "epoch": metric.epoch,
                         "total_strength": metric.total_strength,
                         "non_gt_strength": metric.non_gt_strength,
-                        "frac_non_gt_strength": metric.frac_non_gt_strength,
+                        "total_detected_pairs": metric.total_detected_pairs,
+                        "non_gt_detected_pairs": metric.non_gt_detected_pairs,
+                        "pct_non_gt_detected_pairs": metric.pct_non_gt_detected_pairs,
                     })
 
         if rows or found_standard_snapshots:
@@ -190,7 +209,9 @@ class NIDInteractionAnalyzer:
                     "epoch": metric.epoch,
                     "total_strength": metric.total_strength,
                     "non_gt_strength": metric.non_gt_strength,
-                    "frac_non_gt_strength": metric.frac_non_gt_strength,
+                    "total_detected_pairs": metric.total_detected_pairs,
+                    "non_gt_detected_pairs": metric.non_gt_detected_pairs,
+                    "pct_non_gt_detected_pairs": metric.pct_non_gt_detected_pairs,
                 })
             break
 
@@ -200,7 +221,7 @@ class NIDInteractionAnalyzer:
 def plot_non_gt_emergence(
     df: pd.DataFrame,
     save_path: str | None = None,
-    title: str = "Emergence of non-ground-truth interactions during training",
+    title: str = "Percentage of detected pairwise interactions not in ground truth during training",
     ax: plt.Axes | None = None,
 ):
     if save_path is None:
@@ -217,7 +238,7 @@ def plot_non_gt_emergence(
         d = df[df["noise"] == noise]
         if d.empty:
             continue
-        g = d.groupby("epoch")["frac_non_gt_strength"]
+        g = d.groupby("epoch")["pct_non_gt_detected_pairs"]
         med = g.median()
         q25 = g.quantile(0.25)
         q75 = g.quantile(0.75)
@@ -227,7 +248,7 @@ def plot_non_gt_emergence(
         ax.fill_between(med.index, q25.values, q75.values, color=color, alpha=0.20)
 
     ax.set_xlabel("Epoch")
-    ax.set_ylabel("Fraction of pairwise interaction strength on non-GT pairs")
+    ax.set_ylabel("Percentage of detected pairwise interactions not in ground truth")
     ax.set_title(title)
     ax.set_ylim(0, 1)
     ax.grid(alpha=0.3)
@@ -240,13 +261,6 @@ def plot_non_gt_emergence(
         print(f"Saved: {save_path}")
 
     return fig, ax
-
-
-# Helper: epochwise delta calculation for plotting
-def _compute_epochwise_delta_series(values: pd.Series, epochs: Sequence[int]) -> pd.Series:
-    """Return first differences aligned to the provided sorted epoch index."""
-    s = values.reindex(epochs).sort_index()
-    return s.diff()
 
 
 # Plotting delta of non-GT emergence
@@ -271,30 +285,25 @@ def plot_non_gt_emergence_delta(
         if d.empty:
             continue
 
-        all_epochs = sorted(d["epoch"].unique())
         delta_rows = []
 
         for fn_idx, fn_df in d.groupby("function"):
-            fn_series = (
-                fn_df.groupby("epoch")["frac_non_gt_strength"]
-                .median()
-                .sort_index()
-            )
-            deltas = _compute_epochwise_delta_series(fn_series, all_epochs)
+            fn_series = fn_df.groupby("epoch")["non_gt_strength"].median().sort_index()
+            deltas = fn_series.diff()
             for epoch, delta in deltas.items():
                 if pd.isna(delta):
                     continue
                 delta_rows.append({
                     "function": fn_idx,
                     "epoch": epoch,
-                    "delta_frac_non_gt_strength": float(delta),
+                    "delta_non_gt_strength": float(delta),
                 })
 
         if not delta_rows:
             continue
 
         delta_df = pd.DataFrame(delta_rows)
-        g = delta_df.groupby("epoch")["delta_frac_non_gt_strength"]
+        g = delta_df.groupby("epoch")["delta_non_gt_strength"]
         med = g.median()
         q25 = g.quantile(0.25)
         q75 = g.quantile(0.75)
@@ -310,7 +319,7 @@ def plot_non_gt_emergence_delta(
 
     ax.axhline(0.0, color="black", linewidth=1, alpha=0.6)
     ax.set_xlabel("Epoch")
-    ax.set_ylabel("Δ fraction of non-GT pairwise interaction strength")
+    ax.set_ylabel("Δ non-GT pairwise interaction strength")
     ax.set_title(title)
     ax.grid(alpha=0.3)
     ax.legend()
@@ -344,7 +353,9 @@ def compute_non_gt_fraction_for_model(
         "epoch": metric.epoch,
         "total_strength": metric.total_strength,
         "non_gt_strength": metric.non_gt_strength,
-        "frac_non_gt_strength": metric.frac_non_gt_strength,
+        "total_detected_pairs": metric.total_detected_pairs,
+        "non_gt_detected_pairs": metric.non_gt_detected_pairs,
+        "pct_non_gt_detected_pairs": metric.pct_non_gt_detected_pairs,
     }
 
 
@@ -362,7 +373,7 @@ def add_non_gt_fraction_annotation(
     ax.text(
         x,
         y,
-        f"non-GT fraction: {metrics['frac_non_gt_strength']:.3f}",
+        f"non-GT detected pairs: {metrics['pct_no_gt_detected_pairs']:.1%}",
         transform=ax.transAxes,
         ha="left",
         va="top",
