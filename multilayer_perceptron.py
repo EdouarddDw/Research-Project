@@ -89,6 +89,7 @@ def train(
     save_snapshots=False,
     snapshot_epochs=None,
     snapshot_dir="./outputs/snapshots",
+    sanity_check_every=0,
 ):
     """
     Train the MLP model.
@@ -102,6 +103,8 @@ def train(
         defaults to [1, 2, 3, 5, 8, 10, 15, 20, 30, 50, 75, 100, 150, 200, 250, 300].
     snapshot_dir : str
         Directory to save snapshot files.
+    sanity_check_every : int
+        If > 0, run lightweight sanity checks every N epochs.
     """
     import os
     
@@ -157,6 +160,35 @@ def train(
         history["epoch"].append(current_epoch)
         history["train_loss"].append(tr)
         history["val_loss"].append(va)
+
+        if sanity_check_every and current_epoch % sanity_check_every == 0:
+            if not np.isfinite(tr) or not np.isfinite(va):
+                raise ValueError(
+                    f"Sanity check failed at epoch {current_epoch}: non-finite loss "
+                    f"(train={tr}, val={va})."
+                )
+
+            with torch.no_grad():
+                has_non_finite_param = any(
+                    not torch.isfinite(p).all() for p in net.parameters()
+                )
+                param_sq_sum = sum((p.detach() ** 2).sum() for p in net.parameters())
+                param_l2 = torch.sqrt(param_sq_sum).item()
+
+            if has_non_finite_param:
+                raise ValueError(
+                    f"Sanity check failed at epoch {current_epoch}: non-finite model parameters."
+                )
+
+            msg = (
+                f"[sanity] epoch {current_epoch}: "
+                f"train={tr:.6f}, val={va:.6f}, param_l2={param_l2:.4f}"
+            )
+            if len(history["val_loss"]) >= 3:
+                v0, v1, v2 = history["val_loss"][-3:]
+                if np.isfinite(v0) and np.isfinite(v1) and np.isfinite(v2) and (v0 < v1 < v2):
+                    msg += " | warning: val_loss increasing for 3 consecutive epochs"
+            print(msg)
 
         if save_snapshots and current_epoch in snapshot_epochs:
             state = {k: v.detach().cpu().clone() for k, v in net.state_dict().items()}
