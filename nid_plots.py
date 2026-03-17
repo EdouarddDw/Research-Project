@@ -40,7 +40,11 @@ class NIDPlotConfig:
     fallback_snapshot_dirs: tuple[str, ...] = tuple(SNAPSHOT_FALLBACK_DIRS)
     fallback_function: int = 0
     fallback_noise: float = 0.1
+<<<<<<< HEAD
     device: str = "mps" if torch.backends.mps.is_available() else "cuda"
+=======
+    device: str = "cuda"
+>>>>>>> a8b7beb333241fd953edd67f66418cfd7de26c1a
 
 
 @dataclass
