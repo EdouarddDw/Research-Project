@@ -40,7 +40,7 @@ class NIDPlotConfig:
     fallback_snapshot_dirs: tuple[str, ...] = tuple(SNAPSHOT_FALLBACK_DIRS)
     fallback_function: int = 0
     fallback_noise: float = 0.1
-    device: str = "cpu"
+    device: str = "cuda"
 
 
 @dataclass
