@@ -90,11 +90,12 @@ def train(
     l1_const=1e-4,
     l2_const=0,
     learning_rate=0.01,
-    opt_func=optim.Adam,
+    opt_func=optim.SGD,
     device=torch.device("cpu"),
     save_snapshots=False,
     snapshot_epochs=None,
     snapshot_dir="./outputs/snapshots",
+    sanity_check_every=2,
 ):
     """
     Train the MLP model.
@@ -110,7 +111,7 @@ def train(
         Directory to save snapshot files.
     """
     import os
-    
+
     optimizer = opt_func(net.parameters(), lr=learning_rate, weight_decay=l2_const)
     
     # Setup snapshot saving
@@ -178,7 +179,7 @@ def train(
             key = "val" if "val" in data_loaders else "train"
             val_loss = evaluate(net, data_loaders[key], criterion, device)
 
-            if epoch % 2 == 0:
+            if epoch % sanity_check_every == 0:
                 if verbose:
                     print(
                         "[epoch %d, total %d] train loss: %.4f, val loss: %.4f"

@@ -68,21 +68,36 @@ def create_ice_gif(
     n_bg = len(X_bg)
     curve_idx = rng.choice(n_bg, size=min(n_curve_sample, n_bg), replace=False)
 
+    # PASS 1: precompute all frames + global y-limits (percentile-based)
+    precomputed = []
+    ice_values_all = []
+    for epoch in epochs:
+        model = models[epoch]
+        ice = compute_ice(model, X_bg, feature_idx, grid)  # [n_bg, len(grid)]
+        pdp = ice.mean(axis=0)
+        ice_samples = ice[curve_idx, :]  # only the curves we will plot
+        precomputed.append((ice_samples, pdp))
+        ice_values_all.append(ice_samples.ravel())
+        ice_values_all.append(pdp.ravel())
+
+    ice_values_all_concat = np.concatenate(ice_values_all) if ice_values_all else np.array([0.0])
+    global_ymin = float(np.percentile(ice_values_all_concat, 2))
+    global_ymax = float(np.percentile(ice_values_all_concat, 98))
+
     fig, ax = plt.subplots(figsize=(8, 4), constrained_layout=True)
 
     def update(frame_idx):
         ax.clear()
         epoch = epochs[frame_idx]
-        model = models[epoch]
-        ice = compute_ice(model, X_bg, feature_idx, grid)
-        pdp = ice.mean(axis=0)
-        for k in curve_idx:
-            ax.plot(grid, ice[k], color="#2ca02c", alpha=0.15, linewidth=0.8)
+        ice_samples, pdp = precomputed[frame_idx]
+        for row_idx in range(ice_samples.shape[0]):
+            ax.plot(grid, ice_samples[row_idx], color="#2ca02c", alpha=0.15, linewidth=0.8)
         ax.plot(grid, pdp, color="black", linestyle="--", linewidth=2.2, label="PDP")
         ax.set_xlabel(feature_name, fontsize=10)
         ax.set_ylabel("Model output", fontsize=10)
         ax.set_title(f"Epoch {epoch}", fontsize=13, fontweight="bold")
         ax.set_xlim(v_min, v_max)
+        ax.set_ylim(global_ymin, global_ymax)
         ax.grid(True, color="#e0e0e0", linestyle="--")
         return []
 
@@ -114,18 +129,33 @@ def create_ice_centered_gif(
     n_bg = len(X_bg)
     curve_idx = rng.choice(n_bg, size=min(n_curve_sample, n_bg), replace=False)
 
-    fig, ax = plt.subplots(figsize=(8, 4), constrained_layout=True)
-
-    def update(frame_idx):
-        ax.clear()
-        epoch = epochs[frame_idx]
+    # PASS 1: precompute all frames + global y-limits (percentile-based)
+    precomputed = []
+    ice_values_all = []
+    for epoch in epochs:
         model = models[epoch]
         ice = compute_ice(model, X_bg, feature_idx, grid)
         ice_centered = ice - ice[:, [0]]
         mean_centered = ice_centered.mean(axis=0)
         std_centered = ice_centered.std(axis=0)
-        for k in curve_idx:
-            ax.plot(grid, ice_centered[k], color="#2ca02c", alpha=0.3, linewidth=0.9)
+        ice_centered_samples = ice_centered[curve_idx, :]
+        precomputed.append((ice_centered_samples, mean_centered, std_centered))
+        ice_values_all.append(ice_centered_samples.ravel())
+        ice_values_all.append((mean_centered - std_centered).ravel())
+        ice_values_all.append((mean_centered + std_centered).ravel())
+
+    ice_values_all_concat = np.concatenate(ice_values_all) if ice_values_all else np.array([0.0])
+    global_ymin = float(np.percentile(ice_values_all_concat, 2))
+    global_ymax = float(np.percentile(ice_values_all_concat, 98))
+
+    fig, ax = plt.subplots(figsize=(8, 4), constrained_layout=True)
+
+    def update(frame_idx):
+        ax.clear()
+        epoch = epochs[frame_idx]
+        ice_centered_samples, mean_centered, std_centered = precomputed[frame_idx]
+        for row_idx in range(ice_centered_samples.shape[0]):
+            ax.plot(grid, ice_centered_samples[row_idx], color="#2ca02c", alpha=0.3, linewidth=0.9)
         ax.fill_between(
             grid,
             mean_centered - std_centered,
@@ -139,6 +169,7 @@ def create_ice_centered_gif(
         ax.set_ylabel("Centered model output", fontsize=10)
         ax.set_title(f"Epoch {epoch}", fontsize=13, fontweight="bold")
         ax.set_xlim(v_min, v_max)
+        ax.set_ylim(global_ymin, global_ymax)
         ax.grid(True, color="#e0e0e0", linestyle="--")
         return []
 

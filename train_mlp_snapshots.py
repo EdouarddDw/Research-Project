@@ -24,6 +24,7 @@ import pickle
 import numpy as np
 import pandas as pd
 import torch
+import torch.optim as optim
 import torch.nn as nn
 import matplotlib
 matplotlib.use("Agg")
@@ -39,26 +40,33 @@ from utils import preprocess_data
 SEED = 42
 torch.manual_seed(SEED)
 np.random.seed(SEED)
+DEVICE = torch.device("cpu")
 
 SYNTH_FN_IDX   = 2             # 0-indexed: 0=F1, 2=F3, etc.
-NOISE_STD      = 0.0           # noise for synth functions
+NOISE_STD      = 1             # noise for synth functions
 NUM_FEATURES   = 10            # all synth functions have 10 features
-HIDDEN_UNITS   = [140, 100, 60, 20]
+HIDDEN_UNITS   = [256, 256]
 USE_MAIN_EFFECT_NETS = True
-NUM_SAMPLES    = 3000
+NUM_SAMPLES    = 1000
 
-EPOCHS         = 300
+EPOCHS         = 250
 LR             = 1e-2           # multilayer_perceptron default is 1e-2
-L1_CONST       = 5e-5          # L1 on interaction_mlp weights
+# Run ONLY SGD as requested (no Adam extra runs).
+SGD_MOMENTUM = 0.0  # can be tuned later
+L1_CONST       = 0.0           # L1 on interaction_mlp weights
 L2_CONST       = 0.0
 
 # Dense early (1–30), sparse late (40–300) for maturation vs saturation/decay
 SNAPSHOT_EPOCHS = sorted(set(
-    list(range(1, 31)) + [40, 50, 60, 75, 90, 100, 125, 150, 175, 200, 250, 300]
+    list(range(1, 31)) + [40, 50, 60, 75, 90, 100, 125, 150, 175, 200, 220, 250]
 ))
 
 BASE_OUTPUT_DIR = "./outputs/snapshots"
 os.makedirs(BASE_OUTPUT_DIR, exist_ok=True)
+
+# With NUM_SAMPLES=1000 we must avoid empty train split.
+VALID_SIZE = 150
+TEST_SIZE = 150
 
 
 # ─────────────────────────────────────────────
@@ -272,8 +280,8 @@ def main():
     # 2. Preprocess using supervisor's utility
     data_loaders = preprocess_data(
         X, y,
-        valid_size=500,
-        test_size=500,
+        valid_size=VALID_SIZE,
+        test_size=TEST_SIZE,
         std_scale=False,  # keep raw feature space so PDP/ICE background matches
         get_torch_loaders=True,
         batch_size=256,
@@ -282,7 +290,7 @@ def main():
     unreg_dir = os.path.join(BASE_OUTPUT_DIR, "unregularized")
     l2_dir    = os.path.join(BASE_OUTPUT_DIR, "l2")
 
-    def run_experiment(name, l1_const, l2_const, output_dir):
+    def run_experiment(name, l1_const, l2_const, output_dir, optimizer_name, opt_func):
         os.makedirs(output_dir, exist_ok=True)
 
         model = MLP(NUM_FEATURES, HIDDEN_UNITS,
@@ -294,11 +302,14 @@ def main():
             learning_rate=LR,
             l1_const=l1_const,
             l2_const=l2_const,
+            device=DEVICE,
+            opt_func=opt_func,
             verbose=True,
             early_stopping=False,
             save_snapshots=True,
             snapshot_epochs=SNAPSHOT_EPOCHS,
             snapshot_dir=output_dir,
+            sanity_check_every=10,
         )
 
         # Recompute train/val losses from snapshots (Option B)
@@ -311,6 +322,7 @@ def main():
             "ground_truth": ground_truth,
             "synth_fn_idx": SYNTH_FN_IDX,
             "noise_std": NOISE_STD,
+            "optimizer": optimizer_name,
         }
         with open(os.path.join(output_dir, "meta.pkl"), "wb") as f:
             pickle.dump(meta, f)
@@ -318,11 +330,26 @@ def main():
         print(f"\n{name} complete. Test loss: {test_loss:.5f}")
         return model, test_loss, snapshots, loss_df
 
-    unreg_model, unreg_loss, _, unreg_loss_df = run_experiment(
-        "Unregularized", l1_const=0.0, l2_const=0.0, output_dir=unreg_dir
+    # SGD optimizer (single run: unregularized + L2)
+    def sgd_opt_func(params, lr, weight_decay):
+        return optim.SGD(params, lr=lr, momentum=SGD_MOMENTUM, weight_decay=weight_decay)
+
+    print("\n=== Running optimizer: sgd ===")
+    _, unreg_loss, _, unreg_loss_df = run_experiment(
+        "SGD Unregularized",
+        l1_const=0.0,
+        l2_const=0.0,
+        output_dir=unreg_dir,
+        optimizer_name="sgd",
+        opt_func=sgd_opt_func,
     )
-    l2_model, l2_loss, _, l2_loss_df = run_experiment(
-        "L2 Regularized", l1_const=0.0, l2_const=1e-4, output_dir=l2_dir
+    _, l2_loss, _, l2_loss_df = run_experiment(
+        "SGD L2 Regularized",
+        l1_const=0.0,
+        l2_const=1e-4,
+        output_dir=l2_dir,
+        optimizer_name="sgd",
+        opt_func=sgd_opt_func,
     )
 
     print("\nGenerating diagnostic plots...")

@@ -26,6 +26,7 @@ from pdp_analysis import (
     load_meta,
     get_background_data,
     ensure_dirs,
+    all_feature_pairs,
     PDP_GIFS_DIR,
     UNREG_SNAPSHOT_DIR,
     GRID_POINTS_1D,
@@ -188,13 +189,11 @@ def create_interaction_signature_gif(models, X_bg, pair1, pair2, feature_names, 
     cond_values2 = [np.percentile(X_bg[:, pair2[1]], p * 100) for p in cond_pct]
     linestyles = ["-", "--", ":"]
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True)
-
-    n_epochs = len(epochs)
-    def update(frame_idx):
-        epoch = epochs[frame_idx]
-        if frame_idx % 10 == 0 or frame_idx == n_epochs - 1:
-            print(f"      interaction sig frame {frame_idx + 1}/{n_epochs}", flush=True)
+    # PASS 1: precompute all epochs + global y-limits (per panel)
+    precomputed = []
+    all_curve_vals1 = []
+    all_curve_vals2 = []
+    for epoch in epochs:
         model = models[epoch]
         grid1, curves1 = compute_interaction_curves(
             model, X_bg, var_idx=pair1[0], cond_idx=pair1[1], cond_values=cond_values1
@@ -202,11 +201,40 @@ def create_interaction_signature_gif(models, X_bg, pair1, pair2, feature_names, 
         grid2, curves2 = compute_interaction_curves(
             model, X_bg, var_idx=pair2[0], cond_idx=pair2[1], cond_values=cond_values2
         )
+        precomputed.append((grid1, curves1, grid2, curves2))
+        for c in cond_values1:
+            all_curve_vals1.append(np.asarray(curves1[c], dtype=float).ravel())
+        for c in cond_values2:
+            all_curve_vals2.append(np.asarray(curves2[c], dtype=float).ravel())
+
+    flat1 = np.concatenate(all_curve_vals1) if all_curve_vals1 else np.array([0.0])
+    flat2 = np.concatenate(all_curve_vals2) if all_curve_vals2 else np.array([0.0])
+    global_ymin1 = float(flat1.min())
+    global_ymax1 = float(flat1.max())
+    pad1 = (global_ymax1 - global_ymin1) * 0.05
+    global_ymin1 -= pad1
+    global_ymax1 += pad1
+
+    global_ymin2 = float(flat2.min())
+    global_ymax2 = float(flat2.max())
+    pad2 = (global_ymax2 - global_ymin2) * 0.05
+    global_ymin2 -= pad2
+    global_ymax2 += pad2
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True)
+
+    n_epochs = len(epochs)
+    def update(frame_idx):
+        if frame_idx % 10 == 0 or frame_idx == n_epochs - 1:
+            print(f"      interaction sig frame {frame_idx + 1}/{n_epochs}", flush=True)
+        epoch = epochs[frame_idx]
+        grid1, curves1, grid2, curves2 = precomputed[frame_idx]
         ax1.clear()
         ax2.clear()
         for c, col, ls in zip(cond_values1, COND_COLORS, linestyles):
             ax1.plot(grid1, curves1[c], color=col, linewidth=2.2, linestyle=ls, label=f"{c:.2f}")
         ax1.axhline(0, color="#aaaaaa", linewidth=0.8)
+        ax1.set_ylim(global_ymin1, global_ymax1)
         ax1.set_title(f"({feature_names[pair1[0]]}, {feature_names[pair1[1]]})", fontsize=10, fontweight="bold")
         ax1.set_xlabel(feature_names[pair1[0]], fontsize=10)
         ax1.set_ylabel("Avg. Model Output (PDP)", fontsize=10)
@@ -214,6 +242,7 @@ def create_interaction_signature_gif(models, X_bg, pair1, pair2, feature_names, 
         for c, col, ls in zip(cond_values2, COND_COLORS, linestyles):
             ax2.plot(grid2, curves2[c], color=col, linewidth=2.2, linestyle=ls, label=f"{c:.2f}")
         ax2.axhline(0, color="#aaaaaa", linewidth=0.8)
+        ax2.set_ylim(global_ymin2, global_ymax2)
         ax2.set_title(f"({feature_names[pair2[0]]}, {feature_names[pair2[1]]})", fontsize=10, fontweight="bold")
         ax2.set_xlabel(feature_names[pair2[0]], fontsize=10)
         ax2.legend(title=f"{feature_names[pair2[1]]}", fontsize=8)
@@ -239,7 +268,7 @@ def main():
 
     print("\nLoading meta (feature_names, ground_truth)...")
     feature_names, ground_truth = load_meta()
-    pairs = ground_truth["pairwise"]
+    pairs = all_feature_pairs(len(feature_names))
 
     print("\nLoading background data...")
     X_bg, _ = get_background_data(MC_MAX_SAMPLES)
@@ -258,7 +287,7 @@ def main():
             models, X_bg, feat_idx, feature_names[feat_idx], epochs_all, out_gif, fps=GIF_FPS
         )
 
-    # create_pdp_gif per GT pair (all pairs from ground_truth["pairwise"])
+    # create_pdp_gif per feature pair (i < j)
     for gif_num, (i, j) in enumerate(pairs, 1):
         out_gif = os.path.join(PDP_GIFS_DIR, f"pdp_2d_x{i}_x{j}.gif")
         print(f"[2/4] 2D PDP GIF {gif_num}/{len(pairs)} (x{i}, x{j})...")

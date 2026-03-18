@@ -10,7 +10,7 @@ Run AFTER train_mlp_snapshots.py has generated model snapshots in:
 
 Generated figures (saved under ./outputs/pdp/static/):
     - pdp_1d_x{i}.png            — 1D PDP per feature (3×3 grid, 9 epochs)
-    - pdp_2d_x{i}_x{j}.png       — 2D PDP per GT pair (3×3 grid, 9 epochs)
+    - pdp_2d_x{i}_x{j}.png       — 2D PDP per feature pair (3×3 grid, 9 epochs)
     - pdp_signature_x{i}_x{j}.png — interaction signature per pair (3×3 grid, 9 epochs)
     (plot_1d_pdp_evolution, plot_2d_pdp_grid, plot_interaction_signature still in code, not called from main)
 
@@ -40,6 +40,9 @@ from train_mlp_snapshots import (
     SNAPSHOT_EPOCHS,
 )
 
+# Inference on this repo is kept on CPU for speed/consistency.
+DEVICE = torch.device("cpu")
+
 # ─────────────────────────────────────────────────────────────
 # GLOBAL STYLE — typography, layout, colours
 # ─────────────────────────────────────────────────────────────
@@ -62,7 +65,7 @@ plt.rcParams.update({
     "legend.fontsize":    9,
     "xtick.direction":    "in",
     "ytick.direction":    "in",
-    "figure.dpi":         150,
+    "figure.dpi":         220,
     "savefig.bbox":       "tight",
     "savefig.facecolor":  "white",
 })
@@ -78,7 +81,7 @@ PDP_STATIC_DIR     = "./outputs/pdp/static"      # all PNG from pdp_analysis.py
 PDP_GIFS_DIR       = "./outputs/pdp/gifs"        # all GIF from pdp_gifs.py
 
 # 9 epochs → 3×3 grid for ALL static plots (1D PDP, 2D PDP, interaction signature)
-GRID_EPOCHS = [1, 3, 5, 10, 20, 30, 50, 150, 300]
+GRID_EPOCHS = [3, 10, 20, 30, 40, 50, 100, 150, 220]
 INTERACTION_EPOCH  = 300
 
 GRID_POINTS_1D = 60
@@ -87,6 +90,10 @@ MC_MAX_SAMPLES = 600  # меньше сэмплов = быстрее 2D PDP и G
 GIF_DPI = 100
 GIF_FPS = 4
 GIF_INTERVAL_MS = 250
+
+# Larger static figures improve readability for 3×3 subplot grids.
+STATIC_FIG_DPI = 220
+GRID_FIGSIZE_3X3 = (18, 15)
 
 # True noise features per synth function (0-indexed).
 # These are features that do NOT appear anywhere in the formula,
@@ -110,6 +117,11 @@ TRUE_NOISE_IDX = {
 # ─────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────
+def all_feature_pairs(n_features: int):
+    """All unique feature pairs (i < j)."""
+    return [(i, j) for i in range(n_features) for j in range(i + 1, n_features)]
+
+
 def ensure_dirs():
     os.makedirs(PDP_STATIC_DIR, exist_ok=True)
     os.makedirs(PDP_GIFS_DIR, exist_ok=True)
@@ -266,7 +278,7 @@ def plot_1d_pdp_evolution(models, X_bg, feature_names, true_idx):
     fig.legend(handles=handles, loc="lower center", ncol=min(len(epochs), 8), frameon=True)
 
     out = os.path.join(PDP_STATIC_DIR, "pdp_1d_evolution.png")
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, dpi=STATIC_FIG_DPI)
     plt.close(fig)
     print(f"  Saved: {out}")
 
@@ -296,7 +308,7 @@ def plot_1d_pdp_individual(models, X_bg, feature_names):
         y_min, y_max = all_vals.min(), all_vals.max()
         fig, axes = plt.subplots(
             3, 3,
-            figsize=(12, 10),
+            figsize=GRID_FIGSIZE_3X3,
             sharey=True,
             constrained_layout=True,
         )
@@ -315,7 +327,7 @@ def plot_1d_pdp_individual(models, X_bg, feature_names):
                 ax.set_ylabel("Avg. Model Output (PDP)", fontsize=10)
             ax.xaxis.set_major_locator(ticker.MaxNLocator(5))
         out = os.path.join(PDP_STATIC_DIR, f"pdp_1d_x{feat_idx}.png")
-        fig.savefig(out, dpi=150)
+        fig.savefig(out, dpi=STATIC_FIG_DPI)
         plt.close(fig)
         print(f"  Saved: {out}")
 
@@ -346,7 +358,7 @@ def plot_2d_pdp_grid(models, X_bg, pairs, feature_names):
         axes = axes.reshape(-1, 1)
 
     fig.suptitle(
-        "2D Partial Dependence — Evolution by Epoch (GT Pairs)",
+        "2D Partial Dependence — Evolution by Epoch",
         fontsize=13, fontweight="bold", y=1.02
     )
 
@@ -377,7 +389,7 @@ def plot_2d_pdp_grid(models, X_bg, pairs, feature_names):
             fig.colorbar(cf, ax=ax, shrink=0.7, label="Avg output" if col == ncols - 1 else "")
 
     out = os.path.join(PDP_STATIC_DIR, "pdp_2d_grid.png")
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, dpi=STATIC_FIG_DPI)
     plt.close(fig)
     print(f"  Saved: {out}")
 
@@ -387,7 +399,7 @@ def plot_2d_pdp_grid(models, X_bg, pairs, feature_names):
 # ─────────────────────────────────────────────────────────────
 def plot_2d_pdp_individual(models, X_bg, pairs, feature_names):
     """
-    For EACH GT pair, save a separate PNG: 3×3 grid, 9 epochs (GRID_EPOCHS).
+    For each feature pair, save a separate PNG: 3×3 grid, 9 epochs (GRID_EPOCHS).
     Shared colour scale (global vmin/vmax). File: pdp_2d_x{i}_x{j}.png
     """
     epochs = [e for e in GRID_EPOCHS if e in models]
@@ -406,7 +418,7 @@ def plot_2d_pdp_individual(models, X_bg, pairs, feature_names):
         vmax = max(z.max() for z in all_Z)
         fig, axes = plt.subplots(
             3, 3,
-            figsize=(12, 10),
+            figsize=GRID_FIGSIZE_3X3,
             constrained_layout=True,
         )
         axes_flat = axes.flatten()
@@ -428,7 +440,7 @@ def plot_2d_pdp_individual(models, X_bg, pairs, feature_names):
             if idx == 8:
                 fig.colorbar(cf, ax=ax, shrink=0.7, label="Avg output")
         out = os.path.join(PDP_STATIC_DIR, f"pdp_2d_x{i}_x{j}.png")
-        fig.savefig(out, dpi=150)
+        fig.savefig(out, dpi=STATIC_FIG_DPI)
         plt.close(fig)
         print(f"  Saved: {out}")
 
@@ -438,7 +450,7 @@ def plot_2d_pdp_individual(models, X_bg, pairs, feature_names):
 # ─────────────────────────────────────────────────────────────
 def plot_interaction_signature(model, X_bg, pair1, pair2, feature_names):
     """
-    PDP of first feature conditioned on second for two GT pairs.
+    PDP of first feature conditioned on second for two pairs.
     Saves as pdp_interaction_signature.png.
     """
     cond_pct = [0.25, 0.5, 0.75]
@@ -481,7 +493,7 @@ def plot_interaction_signature(model, X_bg, pair1, pair2, feature_names):
     ax2.legend(title=f"{feature_names[pair2[1]]} condition", title_fontsize=8)
 
     out = os.path.join(PDP_STATIC_DIR, "pdp_interaction_signature.png")
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, dpi=STATIC_FIG_DPI)
     plt.close(fig)
     print(f"  Saved: {out}")
 
@@ -491,7 +503,7 @@ def plot_interaction_signature(model, X_bg, pair1, pair2, feature_names):
 # ─────────────────────────────────────────────────────────────
 def plot_interaction_signatures_individual(models, X_bg, pairs, feature_names):
     """
-    For each GT pair (i, j), save one PNG: 3×3 grid, 9 epochs (GRID_EPOCHS).
+    For each pair (i, j), save one PNG: 3×3 grid, 9 epochs (GRID_EPOCHS).
     Each subplot: 3 conditioned PDP curves (25th/50th/75th percentile).
     File: pdp_signature_x{i}_x{j}.png
     """
@@ -500,12 +512,34 @@ def plot_interaction_signatures_individual(models, X_bg, pairs, feature_names):
         return
     cond_pct = [0.25, 0.5, 0.75]
     linestyles = ["-", "--", ":"]
+
     for pair_idx, (i, j) in enumerate(pairs):
         print(f"    Interaction signature {pair_idx + 1}/{len(pairs)} (x{i}, x{j})...", flush=True)
         cond_values = [np.percentile(X_bg[:, j], p * 100) for p in cond_pct]
+
+        # PASS 1: precompute all epochs + global y-limits
+        precomputed = []
+        all_curve_vals = []
+        for epoch in epochs:
+            model = models[epoch]
+            grid, curves = compute_interaction_curves(
+                model, X_bg, var_idx=i, cond_idx=j, cond_values=cond_values
+            )
+            precomputed.append((epoch, grid, curves))
+            for c in cond_values:
+                all_curve_vals.append(np.asarray(curves[c], dtype=float).ravel())
+
+        flat = np.concatenate(all_curve_vals) if all_curve_vals else np.array([0.0])
+        global_ymin = float(flat.min())
+        global_ymax = float(flat.max())
+        pad = (global_ymax - global_ymin) * 0.05
+        global_ymin -= pad
+        global_ymax += pad
+
+        # PASS 2: plot with shared y-limits
         fig, axes = plt.subplots(
             3, 3,
-            figsize=(12, 10),
+            figsize=GRID_FIGSIZE_3X3,
             constrained_layout=True,
         )
         axes_flat = axes.flatten()
@@ -513,21 +547,23 @@ def plot_interaction_signatures_individual(models, X_bg, pairs, feature_names):
             f"Interaction Signature — (x{i}, x{j}) — Evolution by Epoch",
             fontsize=13, fontweight="bold", y=1.02,
         )
-        for idx, epoch in enumerate(epochs):
-            model = models[epoch]
-            grid, curves = compute_interaction_curves(
-                model, X_bg, var_idx=i, cond_idx=j, cond_values=cond_values
-            )
+
+        for idx, (epoch, grid, curves) in enumerate(precomputed):
             ax = axes_flat[idx]
             for c, col_c, ls in zip(cond_values, COND_COLORS, linestyles):
                 ax.plot(grid, curves[c], color=col_c, linewidth=2.2, linestyle=ls)
             ax.axhline(0, color="#aaaaaa", linewidth=0.8, linestyle="-")
+            ax.set_ylim(global_ymin, global_ymax)
             ax.set_title(f"Epoch {epoch}", fontsize=10, fontweight="bold")
             ax.set_xlabel(feature_names[i], fontsize=10)
             if idx % 3 == 0:
                 ax.set_ylabel("Avg. Model Output (PDP)", fontsize=10)
+
+        for idx in range(len(precomputed), len(axes_flat)):
+            axes_flat[idx].set_visible(False)
+
         out = os.path.join(PDP_STATIC_DIR, f"pdp_signature_x{i}_x{j}.png")
-        fig.savefig(out, dpi=150)
+        fig.savefig(out, dpi=STATIC_FIG_DPI)
         plt.close(fig)
         print(f"  Saved: {out}")
 
@@ -614,7 +650,7 @@ def plot_pdp_roughness_evolution(models, X_bg, feature_names, true_idx, noise_id
     ]
     ax.legend(handles=handles, loc="best", fontsize=9)
     out = os.path.join(PDP_STATIC_DIR, "pdp_roughness_evolution.png")
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, dpi=STATIC_FIG_DPI)
     plt.close(fig)
     print(f"  Saved: {out}")
 
@@ -684,7 +720,7 @@ def plot_pdp_range_evolution(models, X_bg, feature_names, true_idx, noise_idx):
     ]
     ax.legend(handles=handles, loc="best", fontsize=9)
     out = os.path.join(PDP_STATIC_DIR, "pdp_range_evolution.png")
-    fig.savefig(out, dpi=150)
+    fig.savefig(out, dpi=STATIC_FIG_DPI)
     plt.close(fig)
     print(f"  Saved: {out}")
 
@@ -701,7 +737,8 @@ def main():
 
     print("\nLoading meta (feature_names, ground_truth)...")
     feature_names, ground_truth = load_meta()
-    pairs = ground_truth["pairwise"]
+    # 2D PDP + signatures: by default generate for ALL pairs (i < j).
+    pairs = all_feature_pairs(len(feature_names))
     true_idx = ground_truth["true_idx"]
     # Overfitting plots use formula-based noise; rest of script uses ground_truth as-is.
     noise_idx = TRUE_NOISE_IDX.get(SYNTH_FN_IDX, ground_truth.get("noise_idx", []))
