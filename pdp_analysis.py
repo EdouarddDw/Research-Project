@@ -297,7 +297,8 @@ def plot_1d_pdp_individual(models, X_bg, feature_names):
         return
     n_feat = len(feature_names)
     for feat_idx in range(n_feat):
-        print(f"    1D PDP individual {feat_idx + 1}/{n_feat} (x{feat_idx})...", flush=True)
+        # Visual numbering: 1-indexed for humans; computations remain 0-indexed
+        print(f"    1D PDP individual {feat_idx + 1}/{n_feat} (x{feat_idx + 1})...", flush=True)
         v_min, v_max = X_bg[:, feat_idx].min(), X_bg[:, feat_idx].max()
         grid = np.linspace(v_min, v_max, GRID_POINTS_1D)
         all_vals = []
@@ -314,7 +315,7 @@ def plot_1d_pdp_individual(models, X_bg, feature_names):
         )
         axes_flat = axes.flatten()
         fig.suptitle(
-            f"1D PDP — x{feat_idx} ({feature_names[feat_idx]}) — Evolution by Epoch",
+            f"1D PDP — x{feat_idx + 1} ({feature_names[feat_idx]}) — Evolution by Epoch",
             fontsize=13, fontweight="bold", y=1.02,
         )
         for idx, (epoch, pdp_vals) in enumerate(zip(epochs, all_vals)):
@@ -326,7 +327,7 @@ def plot_1d_pdp_individual(models, X_bg, feature_names):
             if idx % 3 == 0:
                 ax.set_ylabel("Avg. Model Output (PDP)", fontsize=10)
             ax.xaxis.set_major_locator(ticker.MaxNLocator(5))
-        out = os.path.join(PDP_STATIC_DIR, f"pdp_1d_x{feat_idx}.png")
+        out = os.path.join(PDP_STATIC_DIR, f"pdp_1d_x{feat_idx + 1}.png")
         fig.savefig(out, dpi=STATIC_FIG_DPI)
         plt.close(fig)
         print(f"  Saved: {out}")
@@ -406,7 +407,8 @@ def plot_2d_pdp_individual(models, X_bg, pairs, feature_names):
     if not epochs or not pairs:
         return
     for pair_idx, (i, j) in enumerate(pairs):
-        print(f"    2D PDP individual {pair_idx + 1}/{len(pairs)} (x{i}, x{j})...", flush=True)
+        # Visual numbering: 1-indexed for humans; computations remain 0-indexed
+        print(f"    2D PDP individual {pair_idx + 1}/{len(pairs)} (x{i + 1}, x{j + 1})...", flush=True)
         all_Z = []
         all_xs, all_ys = None, None
         for epoch in epochs:
@@ -423,7 +425,7 @@ def plot_2d_pdp_individual(models, X_bg, pairs, feature_names):
         )
         axes_flat = axes.flatten()
         fig.suptitle(
-            f"2D PDP — (x{i}, x{j}) — Evolution by Epoch",
+            f"2D PDP — (x{i + 1}, x{j + 1}) — Evolution by Epoch",
             fontsize=13, fontweight="bold", y=1.02,
         )
         for idx, (epoch, Z) in enumerate(zip(epochs, all_Z)):
@@ -439,7 +441,7 @@ def plot_2d_pdp_individual(models, X_bg, pairs, feature_names):
             ax.yaxis.set_major_locator(ticker.MaxNLocator(5))
             if idx == 8:
                 fig.colorbar(cf, ax=ax, shrink=0.7, label="Avg output")
-        out = os.path.join(PDP_STATIC_DIR, f"pdp_2d_x{i}_x{j}.png")
+        out = os.path.join(PDP_STATIC_DIR, f"pdp_2d_x{i + 1}_x{j + 1}.png")
         fig.savefig(out, dpi=STATIC_FIG_DPI)
         plt.close(fig)
         print(f"  Saved: {out}")
@@ -514,7 +516,8 @@ def plot_interaction_signatures_individual(models, X_bg, pairs, feature_names):
     linestyles = ["-", "--", ":"]
 
     for pair_idx, (i, j) in enumerate(pairs):
-        print(f"    Interaction signature {pair_idx + 1}/{len(pairs)} (x{i}, x{j})...", flush=True)
+        # Visual numbering: 1-indexed for humans; computations remain 0-indexed
+        print(f"    Interaction signature {pair_idx + 1}/{len(pairs)} (x{i + 1}, x{j + 1})...", flush=True)
         cond_values = [np.percentile(X_bg[:, j], p * 100) for p in cond_pct]
 
         # PASS 1: precompute all epochs + global y-limits
@@ -544,7 +547,7 @@ def plot_interaction_signatures_individual(models, X_bg, pairs, feature_names):
         )
         axes_flat = axes.flatten()
         fig.suptitle(
-            f"Interaction Signature — (x{i}, x{j}) — Evolution by Epoch",
+            f"Interaction Signature — (x{i + 1}, x{j + 1}) — Evolution by Epoch",
             fontsize=13, fontweight="bold", y=1.02,
         )
 
@@ -562,7 +565,7 @@ def plot_interaction_signatures_individual(models, X_bg, pairs, feature_names):
         for idx in range(len(precomputed), len(axes_flat)):
             axes_flat[idx].set_visible(False)
 
-        out = os.path.join(PDP_STATIC_DIR, f"pdp_signature_x{i}_x{j}.png")
+        out = os.path.join(PDP_STATIC_DIR, f"pdp_signature_x{i + 1}_x{j + 1}.png")
         fig.savefig(out, dpi=STATIC_FIG_DPI)
         plt.close(fig)
         print(f"  Saved: {out}")

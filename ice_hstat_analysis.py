@@ -87,6 +87,7 @@ GRID_EPOCHS: List[int] = [
 ]
 EPOCHS_ALL: List[int] = [e for e in [1, 10, 50, 100, _MAX_SNAPSHOT_EPOCH] if e > 0]   # for H-stat line plot
 EPOCH_HSTAT_300: int = _MAX_SNAPSHOT_EPOCH
+HSTAT_HEATMAP_EPOCHS: List[int] = sorted(set(GRID_EPOCHS + [_MAX_SNAPSHOT_EPOCH]))
 
 GRID_POINTS_1D: int = 60
 GRID_POINTS_2D: int = 20
@@ -518,7 +519,8 @@ def plot_ice_individual(models: Dict[int, MLP],
 
     for feat_idx in feat_indices:
         feature_name = feature_names[feat_idx]
-        print(f"    ICE individual x{feat_idx} ({feature_name})...", flush=True)
+        # Visual numbering: 1-indexed for humans; computations remain 0-indexed
+        print(f"    ICE individual x{feat_idx + 1} ({feature_name})...", flush=True)
         v_min, v_max = X_bg[:, feat_idx].min(), X_bg[:, feat_idx].max()
         grid = np.linspace(v_min, v_max, GRID_POINTS_1D)
 
@@ -565,7 +567,7 @@ def plot_ice_individual(models: Dict[int, MLP],
         axes_flat = axes.flatten()
 
         fig.suptitle(
-            f"ICE — {feature_name} (x{feat_idx}): Clustered by Slope — Evolution by Epoch",
+            f"ICE — {feature_name} (x{feat_idx + 1}): Clustered by Slope — Evolution by Epoch",
             fontsize=13, fontweight="bold", y=1.02,
         )
 
@@ -612,7 +614,7 @@ def plot_ice_individual(models: Dict[int, MLP],
                 frameon=True,
             )
 
-        out_path = os.path.join(ICE_STATIC_DIR, f"ice_evolution_x{feat_idx}.png")
+        out_path = os.path.join(ICE_STATIC_DIR, f"ice_evolution_x{feat_idx + 1}.png")
         fig.savefig(out_path, dpi=STATIC_FIG_DPI)
         plt.close(fig)
         print(f"  Saved: {out_path}")
@@ -633,7 +635,8 @@ def plot_ice_slopes_individual(models: Dict[int, MLP],
 
     for feat_idx in feat_indices:
         feature_name = feature_names[feat_idx]
-        print(f"    ICE slopes x{feat_idx} ({feature_name})...", flush=True)
+        # Visual numbering: 1-indexed for humans; computations remain 0-indexed
+        print(f"    ICE slopes x{feat_idx + 1} ({feature_name})...", flush=True)
 
         v_min, v_max = X_bg[:, feat_idx].min(), X_bg[:, feat_idx].max()
         grid = np.linspace(v_min, v_max, GRID_POINTS_1D)
@@ -676,7 +679,7 @@ def plot_ice_slopes_individual(models: Dict[int, MLP],
         axes_flat = axes.flatten()
 
         fig.suptitle(
-            f"ICE Slope Distribution — x{feat_idx} ({feature_name}) — Evolution by Epoch",
+            f"ICE Slope Distribution — x{feat_idx + 1} ({feature_name}) — Evolution by Epoch",
             fontsize=13, fontweight="bold", y=1.02,
         )
 
@@ -698,7 +701,7 @@ def plot_ice_slopes_individual(models: Dict[int, MLP],
         for idx in range(len(epochs), len(axes_flat)):
             axes_flat[idx].set_visible(False)
 
-        out_path = os.path.join(ICE_STATIC_DIR, f"ice_slopes_x{feat_idx}.png")
+        out_path = os.path.join(ICE_STATIC_DIR, f"ice_slopes_x{feat_idx + 1}.png")
         fig.savefig(out_path, dpi=STATIC_FIG_DPI)
         plt.close(fig)
         print(f"  Saved: {out_path}")
@@ -719,7 +722,8 @@ def plot_ice_centered_individual(models: Dict[int, MLP],
 
     for feat_idx in feat_indices:
         feature_name = feature_names[feat_idx]
-        print(f"    ICE centered individual x{feat_idx} ({feature_name})...", flush=True)
+        # Visual numbering: 1-indexed for humans; computations remain 0-indexed
+        print(f"    ICE centered individual x{feat_idx + 1} ({feature_name})...", flush=True)
         v_min, v_max = X_bg[:, feat_idx].min(), X_bg[:, feat_idx].max()
         grid = np.linspace(v_min, v_max, GRID_POINTS_1D)
 
@@ -755,7 +759,7 @@ def plot_ice_centered_individual(models: Dict[int, MLP],
         )
         axes_flat = axes.flatten()
         fig.suptitle(
-            f"Centered ICE (c-ICE) — x{feat_idx} ({feature_name}) — Evolution by Epoch",
+            f"Centered ICE (c-ICE) — x{feat_idx + 1} ({feature_name}) — Evolution by Epoch",
             fontsize=13, fontweight="bold", y=1.02,
         )
 
@@ -782,7 +786,7 @@ def plot_ice_centered_individual(models: Dict[int, MLP],
         for idx in range(len(epoch_precomputed), len(axes_flat)):
             axes_flat[idx].set_visible(False)
 
-        out_path = os.path.join(ICE_STATIC_DIR, f"ice_centered_x{feat_idx}.png")
+        out_path = os.path.join(ICE_STATIC_DIR, f"ice_centered_x{feat_idx + 1}.png")
         fig.savefig(out_path, dpi=STATIC_FIG_DPI)
         plt.close(fig)
         print(f"  Saved: {out_path}")
@@ -924,7 +928,7 @@ def plot_hstat_evolution(models: Dict[int, MLP],
 
     for idx, pair in enumerate(pairs):
         color, ls = styles[idx % len(styles)]
-        label = labels[idx] if idx < len(labels) else f"x{pair[0]}×x{pair[1]}"
+        label = labels[idx] if idx < len(labels) else f"x{pair[0] + 1}×x{pair[1] + 1}"
         ax.plot(
             epochs_sorted,
             h_values[pair],
@@ -967,6 +971,7 @@ def plot_hstat_heatmap(model: MLP,
                        X_bg: np.ndarray,
                        feature_names: List[str],
                        idx_subset: List[int],
+                       epoch: int,
                        out_filename: str) -> None:
     """
     Heatmap of H-statistic for all pairs among idx_subset.
@@ -1002,7 +1007,7 @@ def plot_hstat_heatmap(model: MLP,
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
 
     fig.suptitle(
-        f"H-Statistic Heatmap at Epoch {EPOCH_HSTAT_300} — Pairwise Interaction Strength",
+        f"H-Statistic Heatmap at Epoch {epoch} — Pairwise Interaction Strength",
         fontsize=13,
         fontweight="bold",
         y=1.02,
@@ -1132,7 +1137,8 @@ def plot_hstat_evolution_individual(models: Dict[int, MLP],
         return
 
     for pair_idx, (i, j) in enumerate(hstat_pairs):
-        print(f"    H-stat evolution {pair_idx + 1}/{len(hstat_pairs)} (x{i}, x{j})...", flush=True)
+        # Visual numbering: 1-indexed for humans; computations remain 0-indexed
+        print(f"    H-stat evolution {pair_idx + 1}/{len(hstat_pairs)} (x{i + 1}, x{j + 1})...", flush=True)
         vals = []
         for epoch in epochs_sorted:
             model = models[epoch]
@@ -1141,7 +1147,7 @@ def plot_hstat_evolution_individual(models: Dict[int, MLP],
 
         fig, ax = plt.subplots(figsize=(6.5, 4), constrained_layout=True)
         fig.suptitle(
-            f"Friedman H-Statistic — Evolution by Epoch (x{i}×x{j})",
+            f"Friedman H-Statistic — Evolution by Epoch (x{i + 1}×x{j + 1})",
             fontsize=13,
             fontweight="bold",
             y=1.02,
@@ -1154,7 +1160,7 @@ def plot_hstat_evolution_individual(models: Dict[int, MLP],
         ax.set_ylabel("H-statistic (0–1)")
         ax.set_title(f"Pair: {feature_names[i]} × {feature_names[j]}", fontsize=10, fontweight="bold")
 
-        out_path = os.path.join(ICE_STATIC_DIR, f"hstat_evolution_x{i}_x{j}.png")
+        out_path = os.path.join(ICE_STATIC_DIR, f"hstat_evolution_x{i + 1}_x{j + 1}.png")
         fig.savefig(out_path, dpi=STATIC_FIG_DPI)
         plt.close(fig)
         print(f"  Saved: {out_path}")
@@ -1205,8 +1211,10 @@ def main() -> None:
 
     # 4. H-statistic evolution: ALL feature pairs (individual files; readable at 45 pairs)
     hstat_pairs = all_pairs
-    pair_labels = [f"x{p[0]}×x{p[1]}" for p in hstat_pairs]
-    epochs_hstat = [e for e in GRID_EPOCHS if e in models]
+    # Human-friendly 1-indexed feature numbering in labels
+    pair_labels = [f"x{p[0] + 1}×x{p[1] + 1}" for p in hstat_pairs]
+    # Include the last snapshot epoch too (e.g. 250) for the per-pair evolution lines.
+    epochs_hstat = [e for e in HSTAT_HEATMAP_EPOCHS if e in models]
     if epochs_hstat and hstat_pairs:
         print(f"[4/6] Friedman H-statistic evolution (all pairs: {len(hstat_pairs)} figures)...")
         plot_hstat_evolution_individual(
@@ -1229,17 +1237,20 @@ def main() -> None:
             out_filename="hstat_heatmap_grid.png",
         )
 
-    # 6. H-statistic heatmap (single epoch) at the latest snapshot epoch (ALL features)
-    if idx_subset and EPOCH_HSTAT_300 in models:
-        print(f"[6/6] H-statistic heatmap at epoch {EPOCH_HSTAT_300} (all features)...")
-        model_300 = models[EPOCH_HSTAT_300]
-        plot_hstat_heatmap(
-            model=model_300,
-            X_bg=X_bg,
-            feature_names=feature_names,
-            idx_subset=idx_subset,
-            out_filename="hstat_heatmap_epoch300.png",
-        )
+    # 6. H-statistic heatmaps (ALL features) for multiple epochs
+    heatmap_epochs = [e for e in HSTAT_HEATMAP_EPOCHS if e in models]
+    if idx_subset and heatmap_epochs:
+        print(f"[6/6] H-statistic heatmaps for epochs {heatmap_epochs} (all features)...")
+        for epoch in heatmap_epochs:
+            model_e = models[epoch]
+            plot_hstat_heatmap(
+                model=model_e,
+                X_bg=X_bg,
+                feature_names=feature_names,
+                idx_subset=idx_subset,
+                epoch=epoch,
+                out_filename=f"hstat_heatmap_epoch{epoch}.png",
+            )
 
     print(f"\nDone! All ICE and H-statistic figures saved to: {ICE_STATIC_DIR}")
 
