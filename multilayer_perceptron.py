@@ -33,7 +33,6 @@ class MLP(nn.Module):
         self.use_linear = use_linear
 
         if self.use_main_effect_nets:
-
             if use_linear:
                 self.linear = nn.Linear(num_features, 1, bias=False)
             else:
@@ -82,18 +81,34 @@ def train(
     net,
     data_loaders,
     criterion=nn.MSELoss(reduction="mean"),
-    nepochs=100,
+    nepochs=200,
     verbose=False,
-    learning_rate=0.01,
+    learning_rate=0.001,       # CHANGED: was 0.01 (SGD rate); Adam works well at 0.001–0.005
     device=torch.device("cpu"),
     save_snapshots=False,
     snapshot_epochs=None,
     snapshot_dir="./outputs/snapshots",
     sanity_check_every=0,
+    l1_const=0.0,
+    # ------------------------------------------------------------------ #
+    # OVERFIT KNOBS — set defaults to the overfit-inducing configuration  #
+    # ------------------------------------------------------------------ #
+    use_adam=True,             # CHANGED: was False (SGD); Adam amplifies early spurious interactions
+    weight_decay=0.0,          # CHANGED: ensure zero — any L2 dampens spurious interaction growth
+    subsample_train=None,      # NEW: int or float (0,1) to shrink training set
+    subsample_seed=0,          # NEW: seed for reproducible subsampling
 ):
     """
     Train the MLP model.
-    
+
+    Overfitting modifications vs. original
+    ----------------------------------------
+    1. Optimizer: SGD  →  Adam (adaptive LR amplifies front-loaded spurious interactions)
+    2. weight_decay=0.0  (explicit zero; L2 regularisation dampens spurious interaction growth)
+    3. subsample_train: optionally shrink the training set to reduce constraints on memorisation
+       - int   → keep that many samples
+       - float → keep that fraction of samples  e.g. 0.2 = 20 %
+
     Parameters
     ----------
     save_snapshots : bool
@@ -105,15 +120,76 @@ def train(
         Directory to save snapshot files.
     sanity_check_every : int
         If > 0, run lightweight sanity checks every N epochs.
+    l1_const : float
+        L1 penalty applied to the interaction MLP weights only. This promotes
+        sparse first-layer connectivity, which NID relies on to recover
+        meaningful exact any-order interactions.
+    use_adam : bool
+        If True (default), use Adam optimizer. If False, use SGD (original behaviour).
+    weight_decay : float
+        L2 penalty. Keep at 0.0 to maximise overfitting.
+    subsample_train : int | float | None
+        Subsample the training DataLoader to a smaller dataset.
+    subsample_seed : int
+        Random seed for subsampling reproducibility.
     """
     import os
-    
-    optimizer = torch.optim.SGD(net.parameters(), lr=learning_rate)
-    
-    snapshots = {}
+
+    # ------------------------------------------------------------------
+    # MODIFICATION 3: optional training-set subsampling
+    # ------------------------------------------------------------------
+    if subsample_train is not None:
+        train_dataset = data_loaders["train"].dataset
+        n_total = len(train_dataset)
+
+        if isinstance(subsample_train, float):
+            n_keep = max(1, int(subsample_train * n_total))
+        else:
+            n_keep = int(subsample_train)
+
+        rng = np.random.default_rng(subsample_seed)
+        indices = rng.choice(n_total, size=n_keep, replace=False).tolist()
+        subset = torch.utils.data.Subset(train_dataset, indices)
+
+        # Preserve original DataLoader settings
+        orig_loader = data_loaders["train"]
+        data_loaders = dict(data_loaders)          # shallow copy — don't mutate caller's dict
+        data_loaders["train"] = torch.utils.data.DataLoader(
+            subset,
+            batch_size=orig_loader.batch_size or 32,
+            shuffle=True,
+            num_workers=getattr(orig_loader, "num_workers", 0),
+        )
+        if verbose:
+            print(f"[overfit] subsampled train set: {n_total} → {n_keep} samples")
+
+    # ------------------------------------------------------------------
+    # MODIFICATION 1 & 2: Adam instead of SGD, weight_decay=0.0
+    # ------------------------------------------------------------------
+    if use_adam:
+        # Adam with weight_decay=0.0:
+        #   - Adaptive per-parameter LR accelerates early memorisation
+        #   - Zero weight decay removes the L2 brake on spurious interaction growth
+        optimizer = torch.optim.Adam(
+            net.parameters(),
+            lr=learning_rate,
+            weight_decay=weight_decay,   # 0.0 by default
+        )
+        if verbose:
+            print(f"[overfit] using Adam  lr={learning_rate}  weight_decay={weight_decay}")
+    else:
+        # Original behaviour — pass use_adam=False to restore
+        optimizer = torch.optim.SGD(
+            net.parameters(),
+            lr=learning_rate,
+            weight_decay=weight_decay,
+        )
+        if verbose:
+            print(f"[overfit] using SGD   lr={learning_rate}  weight_decay={weight_decay}")
+
     history = {"epoch": [], "train_loss": [], "val_loss": []}
-    # Setup snapshot saving
-    snapshots = {}  # epoch -> state_dict
+    snapshots = {}
+
     if save_snapshots:
         if snapshot_epochs is None:
             snapshot_epochs = [1, 2, 3, 5, 8, 10, 15, 20, 30, 50, 75, 100, 150, 200, 250, 300]
@@ -131,7 +207,6 @@ def train(
                 losses.append(criterion(preds, labels))
         return torch.stack(losses).mean()
 
-
     if verbose:
         print("starting to train")
         if save_snapshots:
@@ -145,12 +220,20 @@ def train(
             optimizer.zero_grad()
             preds = net(inputs)
             loss = criterion(preds, labels)
+
+            if l1_const > 0:
+                l1_penalty = sum(
+                    param.abs().sum()
+                    for name, param in net.named_parameters()
+                    if "interaction_mlp" in name and "weight" in name
+                )
+                loss = loss + l1_const * l1_penalty
+
             loss.backward()
             optimizer.step()
 
         current_epoch = epoch + 1
 
-        # record every epoch (not only snapshot epochs)
         tr = evaluate(net, data_loaders["train"], criterion, device).item()
         if "val" in data_loaders:
             va = evaluate(net, data_loaders["val"], criterion, device).item()
@@ -206,7 +289,38 @@ def train(
     if verbose:
         print("Finished Training. Test loss: ", test_loss)
 
-    # Return snapshots dict if snapshot saving was enabled
     if save_snapshots:
         return net, test_loss, snapshots, history
     return net, test_loss, history
+
+
+# =============================================================================
+# USAGE EXAMPLE — maximum overfitting configuration
+# =============================================================================
+#
+#   net = MLP(
+#       num_features=10,
+#       hidden_units=[256, 256, 256, 256],   # CHANGED: 4x wider & deeper than e.g. [64, 64]
+#   )
+#
+#   net, test_loss, history = train(
+#       net,
+#       data_loaders,
+#       nepochs=200,
+#       learning_rate=0.005,     # higher than Adam default → faster early memorisation
+#       use_adam=True,           # Adam instead of SGD
+#       weight_decay=0.0,        # no L2 regularisation
+#       subsample_train=0.2,     # use only 20 % of training data
+#       verbose=True,
+#   )
+#
+# To restore the original behaviour exactly:
+#
+#   net, test_loss, history = train(
+#       net,
+#       data_loaders,
+#       learning_rate=0.01,
+#       use_adam=False,
+#       weight_decay=0.0,
+#       subsample_train=None,
+#   )

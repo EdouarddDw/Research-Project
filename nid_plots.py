@@ -17,15 +17,15 @@ from neural_interaction_detection import get_interactions
 
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-BASE_OUT = os.path.join(PROJECT_ROOT, "outputs", "all_functions")
+BASE_OUT = os.path.join(PROJECT_ROOT, "outputs", "all_functions_update")
 SNAPSHOT_FALLBACK_DIRS = [
     os.path.join(PROJECT_ROOT, "outputs", "snapshots", "animation"),
     os.path.join(PROJECT_ROOT, "outputs", "snapshots", "unregularized"),
     os.path.join(PROJECT_ROOT, "outputs", "snapshots"),
 ]
-NOISE_LEVELS = [0.1, 0.5]
+NOISE_LEVELS = [0.0, 0.2, 0.5]
 NUM_FEATURES = 10
-HIDDEN_UNITS = [140, 100, 60, 20]
+HIDDEN_UNITS = [256, 256]
 USE_MAIN_EFFECT_NETS = True
 
 
@@ -39,7 +39,7 @@ class NIDPlotConfig:
     use_main_effect_nets: bool = USE_MAIN_EFFECT_NETS
     fallback_snapshot_dirs: tuple[str, ...] = tuple(SNAPSHOT_FALLBACK_DIRS)
     fallback_function: int = 0
-    fallback_noise: float = 0.1
+    fallback_noise: float = 0.0
     device: str = (
         "cuda"
         if torch.cuda.is_available()
@@ -57,7 +57,7 @@ class SnapshotInteractionMetrics:
     delta_target_placeholder: float = 0.0
     total_detected_pairs: int = 0
     non_gt_detected_pairs: int = 0
-    pct_non_gt_detected_pairs: float = 0.0
+    pct_non_gt_strength: float = 0.0
 
 
 class NIDInteractionAnalyzer:
@@ -101,6 +101,34 @@ class NIDInteractionAnalyzer:
         model.eval()
         return model
 
+    def infer_hidden_units_from_state_dict(self, state_dict: dict) -> list[int]:
+        """Infer hidden layer widths from interaction_mlp linear weights in a checkpoint."""
+        linear_weight_re = re.compile(r"interaction_mlp\.(\d+)\.weight$")
+        weight_layers: list[tuple[int, torch.Tensor]] = []
+
+        for k, v in state_dict.items():
+            m = linear_weight_re.match(k)
+            if m:
+                weight_layers.append((int(m.group(1)), v))
+
+        if not weight_layers:
+            return list(self.config.hidden_units)
+
+        weight_layers.sort(key=lambda x: x[0])
+        # For [in->h1, h1->h2, ..., hk->out], hidden dims are out_features of all but last
+        hidden_units = [int(w.shape[0]) for _, w in weight_layers[:-1]]
+        return hidden_units or list(self.config.hidden_units)
+
+    def make_model_for_state_dict(self, state_dict: dict) -> MLP:
+        hidden_units = self.infer_hidden_units_from_state_dict(state_dict)
+        model = MLP(
+            self.config.num_features,
+            hidden_units,
+            use_main_effect_nets=self.config.use_main_effect_nets,
+        ).to(self.device)
+        model.eval()
+        return model
+
     def load_state_dict_compat(self, checkpoint_path: str):
         state = torch.load(checkpoint_path, map_location=self.device)
         if isinstance(state, dict) and "model_state_dict" in state:
@@ -132,7 +160,7 @@ class NIDInteractionAnalyzer:
             if pair not in gt_pairs:
                 non_gt_strength += s
 
-        pct_non_gt_detected_pairs = non_gt_detected_pairs / (total_detected_pairs + 1e-12)
+        pct_non_gt_strength = non_gt_strength / (total_strength + 1e-12)
         return SnapshotInteractionMetrics(
             noise=noise,
             function=fn_idx,
@@ -141,7 +169,7 @@ class NIDInteractionAnalyzer:
             non_gt_strength=non_gt_strength,
             total_detected_pairs=total_detected_pairs,
             non_gt_detected_pairs=non_gt_detected_pairs,
-            pct_non_gt_detected_pairs=pct_non_gt_detected_pairs,
+            pct_non_gt_strength=pct_non_gt_strength,
         )
 
     def build_non_gt_dataframe(self) -> pd.DataFrame:
@@ -156,10 +184,9 @@ class NIDInteractionAnalyzer:
                     continue
                 found_standard_snapshots = True
 
-                model = self.make_model()
-
                 for ep, pth in snapshots.items():
                     state_dict = self.load_state_dict_compat(pth)
+                    model = self.make_model_for_state_dict(state_dict)
                     model.load_state_dict(state_dict)
                     model.eval()
                     metric = self.compute_snapshot_metric(model, fn_idx, noise, ep)
@@ -171,7 +198,7 @@ class NIDInteractionAnalyzer:
                         "non_gt_strength": metric.non_gt_strength,
                         "total_detected_pairs": metric.total_detected_pairs,
                         "non_gt_detected_pairs": metric.non_gt_detected_pairs,
-                        "pct_non_gt_detected_pairs": metric.pct_non_gt_detected_pairs,
+                        "pct_non_gt_strength": metric.pct_non_gt_strength,
                     })
 
         if rows or found_standard_snapshots:
@@ -186,15 +213,15 @@ class NIDInteractionAnalyzer:
                 continue
 
             print(
-                "No snapshots found in outputs/all_functions/*/noise_*. "
+                "No snapshots found in outputs/all_functions_update/*/noise_*. "
                 f"Using fallback snapshots from: {fallback_dir} "
                 f"with function=F{self.config.fallback_function}, "
                 f"noise={self.config.fallback_noise}."
             )
 
-            model = self.make_model()
             for ep, pth in snapshots.items():
                 state_dict = self.load_state_dict_compat(pth)
+                model = self.make_model_for_state_dict(state_dict)
                 model.load_state_dict(state_dict)
                 model.eval()
                 metric = self.compute_snapshot_metric(
@@ -211,7 +238,7 @@ class NIDInteractionAnalyzer:
                     "non_gt_strength": metric.non_gt_strength,
                     "total_detected_pairs": metric.total_detected_pairs,
                     "non_gt_detected_pairs": metric.non_gt_detected_pairs,
-                    "pct_non_gt_detected_pairs": metric.pct_non_gt_detected_pairs,
+                    "pct_non_gt_strength": metric.pct_non_gt_strength,
                 })
             break
 
@@ -220,8 +247,9 @@ class NIDInteractionAnalyzer:
 
 def plot_non_gt_emergence(
     df: pd.DataFrame,
+    noise_levels: Sequence[float] | None = None,
     save_path: str | None = None,
-    title: str = "Percentage of detected pairwise interactions not in ground truth during training",
+    title: str = "Share of pairwise interaction strength assigned to non-ground-truth interactions during training",
     ax: plt.Axes | None = None,
 ):
     if save_path is None:
@@ -234,11 +262,15 @@ def plot_non_gt_emergence(
     else:
         fig = ax.figure
 
-    for noise, color in [(0.1, "steelblue"), (0.5, "darkorange")]:
+    noise_levels = list(noise_levels) if noise_levels is not None else sorted(df["noise"].unique())
+    cmap = plt.get_cmap("tab10", max(1, len(noise_levels)))
+
+    for idx, noise in enumerate(noise_levels):
+        color = cmap(idx)
         d = df[df["noise"] == noise]
         if d.empty:
             continue
-        g = d.groupby("epoch")["pct_non_gt_detected_pairs"]
+        g = d.groupby("epoch")["pct_non_gt_strength"]
         med = g.median()
         q25 = g.quantile(0.25)
         q75 = g.quantile(0.75)
@@ -248,7 +280,7 @@ def plot_non_gt_emergence(
         ax.fill_between(med.index, q25.values, q75.values, color=color, alpha=0.20)
 
     ax.set_xlabel("Epoch")
-    ax.set_ylabel("Percentage of detected pairwise interactions not in ground truth")
+    ax.set_ylabel("Share of pairwise interaction strength assigned to non-ground-truth interactions")
     ax.set_title(title)
     ax.set_ylim(0, 1)
     ax.grid(alpha=0.3)
@@ -266,6 +298,7 @@ def plot_non_gt_emergence(
 # Plotting delta of non-GT emergence
 def plot_non_gt_emergence_delta(
     df: pd.DataFrame,
+    noise_levels: Sequence[float] | None = None,
     save_path: str | None = None,
     title: str = "Epoch to epoch increase in non-ground-truth interaction strength",
     ax: plt.Axes | None = None,
@@ -280,7 +313,11 @@ def plot_non_gt_emergence_delta(
     else:
         fig = ax.figure
 
-    for noise, color in [(0.1, "steelblue"), (0.5, "darkorange")]:
+    noise_levels = list(noise_levels) if noise_levels is not None else sorted(df["noise"].unique())
+    cmap = plt.get_cmap("tab10", max(1, len(noise_levels)))
+
+    for idx, noise in enumerate(noise_levels):
+        color = cmap(idx)
         d = df[df["noise"] == noise].copy()
         if d.empty:
             continue
@@ -355,7 +392,7 @@ def compute_non_gt_fraction_for_model(
         "non_gt_strength": metric.non_gt_strength,
         "total_detected_pairs": metric.total_detected_pairs,
         "non_gt_detected_pairs": metric.non_gt_detected_pairs,
-        "pct_non_gt_detected_pairs": metric.pct_non_gt_detected_pairs,
+        "pct_non_gt_strength": metric.pct_non_gt_strength,
     }
 
 
@@ -373,7 +410,7 @@ def add_non_gt_fraction_annotation(
     ax.text(
         x,
         y,
-        f"non-GT detected pairs: {metrics['pct_no_gt_detected_pairs']:.1%}",
+        f"non-GT interaction strength share: {metrics['pct_non_gt_strength']:.1%}",
         transform=ax.transAxes,
         ha="left",
         va="top",
@@ -387,18 +424,20 @@ def main():
     config = NIDPlotConfig()
     df = build_non_gt_dataframe(config=config)
     if df.empty:
-        print("No snapshot data found under outputs/all_functions/*/noise_*")
+        print("No snapshot data found under outputs/all_functions_update/*/noise_*")
         return
     csv_path = os.path.join(config.base_out, "non_gt_emergence_metrics.csv")
     df.to_csv(csv_path, index=False)
     print(f"Saved: {csv_path}")
     plot_non_gt_emergence(
         df,
+        noise_levels=config.noise_levels,
         save_path=os.path.join(config.base_out, "non_gt_emergence_noise_comparison.png"),
     )
 
     plot_non_gt_emergence_delta(
         df,
+        noise_levels=config.noise_levels,
         save_path=os.path.join(config.base_out, "non_gt_emergence_delta_noise_comparison.png"),
     )
 
