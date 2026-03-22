@@ -82,16 +82,16 @@ def create_mlp(layer_sizes, out_bias=True):
 def train(
         net,
         data_loaders,
-        criterion=nn.MSELoss(reduction="mean"),
-        nepochs=100,
+        criterion=nn.MSELoss(),
+        nepochs=2500,
         verbose=False,
         early_stopping=False,
         patience=5,
-        l1_const=1e-4,
+        l1_const=0,
         l2_const=0,
         learning_rate=0.01,
-        opt_func=optim.Adam,
-        device=torch.device("cpu"),
+        opt_func=optim.SGD,
+        device=torch.device("mps"),
         save_snapshots=True,
         snapshot_epochs=None,
         snapshot_dir="./outputs/snapshots",
@@ -117,7 +117,7 @@ def train(
     snapshots = {}  # epoch -> state_dict
     if save_snapshots:
         if snapshot_epochs is None:
-            snapshot_epochs = [1, 2, 3, 5, 8, 10, 15, 20, 30, 50, 75, 100, 150, 200, 250, 300]
+            snapshot_epochs = [1, 2, 3, 5, 8, 10, 15, 20, 30, 50, 75, 100, 150, 200, 250]
         snapshot_epochs = [e for e in snapshot_epochs if e <= nepochs]
         os.makedirs(snapshot_dir, exist_ok=True)
 

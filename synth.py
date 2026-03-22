@@ -1,5 +1,8 @@
 import numpy as np
 
+NUM_SAMPLES = 1000
+SEED = 42
+NOISE_STD = 0.05
 
 def _add_noise(y, noise_std, seed):
     if noise_std > 0:
@@ -8,7 +11,7 @@ def _add_noise(y, noise_std, seed):
     return y
 
 
-def f1(num_samples=30000, seed=42, noise_std=0.0):
+def f1(num_samples=NUM_SAMPLES, seed=SEED, noise_std=NOISE_STD):
     np.random.seed(seed)
     X = np.empty((num_samples, 10))
     X[:, [0, 1, 2, 5, 6, 8]] = np.random.uniform(0.0, 1.0, (num_samples, 6))
@@ -25,7 +28,7 @@ def f1(num_samples=30000, seed=42, noise_std=0.0):
     return X, _add_noise(y, noise_std, seed), interactions
 
 
-def f2(num_samples=30000, seed=42, noise_std=0.0):
+def f2(num_samples=NUM_SAMPLES, seed=SEED, noise_std=NOISE_STD):
     np.random.seed(seed)
     X = np.random.uniform(-1, 1, (num_samples, 10))
     x1, x2, x3, x4, x5, x6, x7, x8, x9, x10 = X.T
@@ -40,7 +43,7 @@ def f2(num_samples=30000, seed=42, noise_std=0.0):
     return X, _add_noise(y, noise_std, seed), interactions
 
 
-def f3(num_samples=30000, seed=42, noise_std=0.0):
+def f3(num_samples=NUM_SAMPLES, seed=SEED, noise_std=NOISE_STD):
     np.random.seed(seed)
     X = np.random.uniform(-1, 1, (num_samples, 10))
     x1, x2, x3, x4, x5, x6, x7, x8, x9, x10 = X.T
@@ -56,7 +59,7 @@ def f3(num_samples=30000, seed=42, noise_std=0.0):
     return X, _add_noise(y, noise_std, seed), interactions
 
 
-def f4(num_samples=30000, seed=42, noise_std=0.0):
+def f4(num_samples=NUM_SAMPLES, seed=SEED, noise_std=NOISE_STD):
     np.random.seed(seed)
     X = np.random.uniform(-1, 1, (num_samples, 10))
     x1, x2, x3, x4, x5, x6, x7, x8, x9, x10 = X.T
@@ -73,7 +76,7 @@ def f4(num_samples=30000, seed=42, noise_std=0.0):
     return X, _add_noise(y, noise_std, seed), interactions
 
 
-def f5(num_samples=30000, seed=42, noise_std=0.0):
+def f5(num_samples=NUM_SAMPLES, seed=SEED, noise_std=NOISE_STD):
     np.random.seed(seed)
     X = np.random.uniform(-1, 1, (num_samples, 10))
     x1, x2, x3, x4, x5, x6, x7, x8, x9, x10 = X.T
@@ -87,7 +90,7 @@ def f5(num_samples=30000, seed=42, noise_std=0.0):
     return X, _add_noise(y, noise_std, seed), interactions
 
 
-def f6(num_samples=30000, seed=42, noise_std=0.0):
+def f6(num_samples=NUM_SAMPLES, seed=SEED, noise_std=NOISE_STD):
     np.random.seed(seed)
     X = np.random.uniform(-1, 1, (num_samples, 10))
     x1, x2, x3, x4, x5, x6, x7, x8, x9, x10 = X.T
@@ -101,7 +104,7 @@ def f6(num_samples=30000, seed=42, noise_std=0.0):
     return X, _add_noise(y, noise_std, seed), interactions
 
 
-def f7(num_samples=30000, seed=42, noise_std=0.0):
+def f7(num_samples=NUM_SAMPLES, seed=SEED, noise_std=NOISE_STD):
     np.random.seed(seed)
     X = np.random.uniform(-1, 1, (num_samples, 10))
     x1, x2, x3, x4, x5, x6, x7, x8, x9, x10 = X.T
@@ -116,7 +119,7 @@ def f7(num_samples=30000, seed=42, noise_std=0.0):
     return X, _add_noise(y, noise_std, seed), interactions
 
 
-def f8(num_samples=30000, seed=42, noise_std=0.0):
+def f8(num_samples=NUM_SAMPLES, seed=SEED, noise_std=NOISE_STD):
     np.random.seed(seed)
     X = np.random.uniform(-1, 1, (num_samples, 10))
     x1, x2, x3, x4, x5, x6, x7, x8, x9, x10 = X.T
@@ -131,7 +134,7 @@ def f8(num_samples=30000, seed=42, noise_std=0.0):
     return X, _add_noise(y, noise_std, seed), interactions
 
 
-def f9(num_samples=30000, seed=42, noise_std=0.0):
+def f9(num_samples=NUM_SAMPLES, seed=SEED, noise_std=NOISE_STD):
     np.random.seed(seed)
     X = np.random.uniform(-1, 1, (num_samples, 10))
     x1, x2, x3, x4, x5, x6, x7, x8, x9, x10 = X.T
@@ -146,7 +149,7 @@ def f9(num_samples=30000, seed=42, noise_std=0.0):
     return X, _add_noise(y, noise_std, seed), interactions
 
 
-def f10(num_samples=30000, seed=42, noise_std=0.0):
+def f10(num_samples=NUM_SAMPLES, seed=SEED, noise_std=NOISE_STD):
     np.random.seed(seed)
     X = np.random.uniform(-1, 1, (num_samples, 10))
     x1, x2, x3, x4, x5, x6, x7, x8, x9, x10 = X.T
